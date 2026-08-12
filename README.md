@@ -4,7 +4,7 @@
 
 You built a trip planner for your family in five minutes. Why does sharing it take an afternoon, a cloud account, and making it public to the whole internet?
 
-Kitchen Table turns any folder on your computer into a live web app that the people you choose can open on their phones. No hosting, no deploys, no accounts for your viewers, ever. Drop a folder in, get a local URL and a QR code, decide who can see it. If you use an AI agent, it gets simpler still: ask for an app, and hand your wife a working link thirty seconds later.
+Kitchen Table turns any folder on your computer into a live web app that the people you choose can open on their phones. No hosting, no deploys, no accounts for your viewers, ever. Drop a folder in, get a local URL and a QR code, decide who can see it. If you use an AI agent, it gets simpler still: ask for an app, and hand someone a working link thirty seconds later.
 
 > Named for the kitchen-table business: something small, personal, and family-run. This is the same idea for software.
 
@@ -21,7 +21,7 @@ Kitchen Table turns any folder on your computer into a live web app that the peo
 5. **Agents are first-class.** A built-in MCP server lets Claude Code or any MCP client create apps, deploy files, set sharing, and mint invite links. The whole flow, from "build us a packing list" to a link in the family chat, happens in one conversation.
 
 ```text
-You:    build us a packing list app for the Lisbon trip and share it with Priya
+You:    build us a packing list app for the Lisbon trip and share it with the family
 Agent:  Created "Packing list", set to Invited, here's the link:
         https://packing-list.local/i/kJ82... (QR in your Kitchen Table window)
 ```
