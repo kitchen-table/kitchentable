@@ -102,7 +102,7 @@ impl TrustSource for AllowAll {
     fn on_household_network(&self) -> bool {
         true
     }
-    fn redeem(&self, _token: &str, _ua: &str) -> Result<Redemption, String> {
+    fn redeem(&self, _headers: &axum::http::HeaderMap, _token: &str) -> Result<Redemption, String> {
         Err("not used here".into())
     }
     fn request_access(&self, _headers: &axum::http::HeaderMap, slug: &str) -> Redemption {

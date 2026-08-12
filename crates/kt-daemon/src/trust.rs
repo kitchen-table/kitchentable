@@ -76,7 +76,7 @@ impl TrustSource for Trust {
         self.household
     }
 
-    fn redeem(&self, token: &str, user_agent: &str) -> Result<Redemption, String> {
+    fn redeem(&self, headers: &HeaderMap, token: &str) -> Result<Redemption, String> {
         let now = Self::now();
 
         let token = InviteToken::parse(token).ok_or("That link is not valid.")?;
@@ -86,12 +86,10 @@ impl TrustSource for Trust {
             .map_err(|_| "That link is not valid.")?
             .ok_or("That link is not valid.")?;
 
-        // A device asking for the first time gets an identity before the
-        // invite is checked, because pinning needs something to pin to.
-        let device = Device::pending(DeviceId::generate(), user_agent, now);
-        self.store
-            .upsert_device(&device)
-            .map_err(|_| "Something went wrong on this machine.")?;
+        // Reuse the session if this browser already has one. Opening the same
+        // link twice is ordinary behaviour, and minting a second identity
+        // would make a pinned link report itself as forwarded.
+        let (device, fresh_cookie) = self.identify(headers);
 
         // Rate limiting per source lands with the connection info in the next
         // step; zero here means "no attempts recorded yet".
@@ -119,13 +117,13 @@ impl TrustSource for Trust {
             if auto_approve { "paired" } else { "requested" },
         );
 
+        // Already-approved devices skip the wait page entirely.
+        let approved = auto_approve || device.status == DeviceStatus::Approved;
+
         Ok(Redemption {
-            cookie: Some(kt_server::gate::session_cookie(
-                &self.keys.mint(&device.id, now),
-                false,
-            )),
+            cookie: fresh_cookie,
             app_slug: invite.app_slug,
-            pending: !auto_approve,
+            pending: !approved,
         })
     }
 
@@ -211,7 +209,7 @@ mod tests {
         trust.store.create_invite(&invite).expect("creates");
 
         let redemption = trust
-            .redeem(invite.token.as_str(), "Mozilla/5.0 (iPhone)")
+            .redeem(&HeaderMap::new(), invite.token.as_str())
             .expect("redeems");
 
         assert_eq!(redemption.app_slug, "trip");
@@ -234,7 +232,7 @@ mod tests {
         trust.store.create_invite(&invite).expect("creates");
 
         let redemption = trust
-            .redeem(invite.token.as_str(), "iPhone")
+            .redeem(&HeaderMap::new(), invite.token.as_str())
             .expect("redeems");
         assert!(
             !redemption.pending,
@@ -248,19 +246,86 @@ mod tests {
         let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
         trust.store.create_invite(&invite).expect("creates");
 
+        // Two genuinely different browsers: neither presents a cookie, so
+        // each gets its own identity.
         trust
-            .redeem(invite.token.as_str(), "iPhone")
+            .redeem(&HeaderMap::new(), invite.token.as_str())
             .expect("first redemption");
-        let second = trust.redeem(invite.token.as_str(), "Android");
+        let second = trust.redeem(&HeaderMap::new(), invite.token.as_str());
 
-        assert!(second.is_err(), "a pinned link must not work twice");
+        assert!(
+            second.is_err(),
+            "a pinned link must not work from a second device"
+        );
     }
 
     #[test]
     fn a_nonsense_token_is_refused_without_touching_the_database() {
         let trust = trust();
-        assert!(trust.redeem("../../etc/passwd", "curl").is_err());
-        assert!(trust.redeem("", "curl").is_err());
+        assert!(trust.redeem(&HeaderMap::new(), "../../etc/passwd").is_err());
+        assert!(trust.redeem(&HeaderMap::new(), "").is_err());
+    }
+
+    #[test]
+    fn reopening_the_link_you_were_sent_still_works() {
+        // The bug this guards: minting a new identity on every redemption made
+        // a pinned link refuse the very person it was pinned to, the second
+        // time they opened it.
+        let trust = trust();
+        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        trust.store.create_invite(&invite).expect("creates");
+
+        let first = trust
+            .redeem(&HeaderMap::new(), invite.token.as_str())
+            .expect("first redemption");
+
+        let mut headers = HeaderMap::new();
+        let value = first
+            .cookie
+            .expect("minted")
+            .split(';')
+            .next()
+            .expect("pair")
+            .to_string();
+        headers.insert(header::COOKIE, value.parse().expect("valid"));
+
+        let again = trust.redeem(&headers, invite.token.as_str());
+        assert!(again.is_ok(), "the same browser must be let back in");
+    }
+
+    #[test]
+    fn an_approved_device_skips_the_wait_page() {
+        let trust = trust();
+        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        trust.store.create_invite(&invite).expect("creates");
+
+        let first = trust
+            .redeem(&HeaderMap::new(), invite.token.as_str())
+            .expect("redeems");
+        assert!(first.pending);
+
+        // The owner approves, and the same browser comes back.
+        let devices = trust.store.list_devices().expect("lists");
+        let pending = devices.first().expect("a device");
+        trust
+            .store
+            .set_device_status(&pending.id, DeviceStatus::Approved)
+            .expect("approves");
+
+        let mut headers = HeaderMap::new();
+        let value = first
+            .cookie
+            .expect("minted")
+            .split(';')
+            .next()
+            .expect("pair")
+            .to_string();
+        headers.insert(header::COOKIE, value.parse().expect("valid"));
+
+        let again = trust
+            .redeem(&headers, invite.token.as_str())
+            .expect("redeems");
+        assert!(!again.pending, "an approved device should go straight in");
     }
 
     #[test]

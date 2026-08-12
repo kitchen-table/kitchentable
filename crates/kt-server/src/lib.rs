@@ -60,11 +60,13 @@ pub trait TrustSource: Send + Sync + 'static {
     /// Whether this machine is currently on a network the owner marked as home.
     fn on_household_network(&self) -> bool;
 
-    /// Redeem an invite for a device, registering it if new.
+    /// Redeem an invite for the device behind this request.
     ///
-    /// Returns the cookie to set, and whether the device still needs the
-    /// owner's approval.
-    fn redeem(&self, token: &str, user_agent: &str) -> Result<Redemption, String>;
+    /// Takes the headers rather than just a user agent so an existing session
+    /// is reused: someone re-opening the link they were sent is the same
+    /// device, and minting a new identity would make a pinned link look like
+    /// it had been forwarded.
+    fn redeem(&self, headers: &axum::http::HeaderMap, token: &str) -> Result<Redemption, String>;
 
     /// Note that a device asked for an app it cannot open yet, so the owner
     /// gets an approval prompt.
@@ -191,12 +193,7 @@ async fn redeem<S: AppSource, T: TrustSource>(
     headers: axum::http::HeaderMap,
     AxumPath(token): AxumPath<String>,
 ) -> Response {
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-
-    match state.trust.redeem(&token, user_agent) {
+    match state.trust.redeem(&headers, &token) {
         Ok(redemption) => {
             let app_name = state
                 .apps
