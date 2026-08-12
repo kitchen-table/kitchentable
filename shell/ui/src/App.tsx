@@ -4,6 +4,8 @@ import { Disconnected } from "./Disconnected";
 import { Library } from "./Library";
 import { Sharing } from "./Sharing";
 import { StatusBar } from "./StatusBar";
+import { Onboarding } from "./onboarding/Onboarding";
+import { isComplete } from "./onboarding/steps";
 import { useApps, useHealth, useStatus } from "./daemon";
 
 const client = new QueryClient();
@@ -30,6 +32,7 @@ function Window() {
   const apps = useApps(ready);
   const status = useStatus(ready);
   const [sharing, setSharing] = useState<string | null>(null);
+  const [onboarded, setOnboarded] = useState(isComplete);
 
   // Resolve from the live list rather than holding a copy, so the panel keeps
   // showing the current visibility after a change.
@@ -41,6 +44,18 @@ function Window() {
 
   if (!ready) {
     return <Disconnected health={health.data} onRetry={() => health.refetch()} />;
+  }
+
+  // First run, once there is a daemon to show real state from. Running it
+  // before the daemon is up would mean an onboarding flow full of blanks.
+  if (!onboarded) {
+    return (
+      <Onboarding
+        apps={apps.data ?? []}
+        status={status.data}
+        onDone={() => setOnboarded(true)}
+      />
+    );
   }
 
   return (
