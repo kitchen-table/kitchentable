@@ -165,27 +165,32 @@ impl Registry {
         Ok(manifest)
     }
 
-    /// Watch the workspace, calling `on_change` after the filesystem settles.
+    /// Watch the workspace, calling `on_change` once the filesystem settles.
     ///
     /// Deliberately coarse: any event triggers a full rescan rather than
     /// per-path bookkeeping. A workspace is tens of folders, a rescan is
     /// microseconds, and the state machine that per-path updates would need is
     /// where this kind of code usually goes wrong.
     ///
+    /// Trailing edge, not leading. Firing on the first event and ignoring the
+    /// rest of the burst loses whatever happened during the quiet window - a
+    /// folder deleted just after one was added would stay in the library until
+    /// some unrelated change came along. So events are coalesced and the rescan
+    /// runs after things go quiet.
+    ///
     /// The returned watcher must be kept alive; dropping it stops the watch.
     pub fn watch(
         &self,
         mut on_change: impl FnMut() + Send + 'static,
     ) -> Result<impl Watcher, RegistryError> {
-        let mut last = std::time::Instant::now() - DEBOUNCE;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
 
         let mut watcher = notify::recommended_watcher(
             move |res: Result<notify::Event, notify::Error>| match res {
                 Ok(event) if is_interesting(&event) => {
-                    if last.elapsed() >= DEBOUNCE {
-                        last = std::time::Instant::now();
-                        on_change();
-                    }
+                    // A closed channel means the coalescing thread is gone,
+                    // which happens only during shutdown.
+                    let _ = tx.send(());
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "watch error"),
@@ -193,6 +198,28 @@ impl Registry {
         )?;
 
         watcher.watch(&self.workspace, RecursiveMode::Recursive)?;
+
+        std::thread::Builder::new()
+            .name("kt-workspace".into())
+            .spawn(move || {
+                use std::sync::mpsc::RecvTimeoutError;
+
+                while rx.recv().is_ok() {
+                    // Drain the burst: keep waiting until nothing has arrived
+                    // for a whole debounce interval.
+                    loop {
+                        match rx.recv_timeout(DEBOUNCE) {
+                            Ok(()) => continue,
+                            Err(RecvTimeoutError::Timeout) => break,
+                            Err(RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    on_change();
+                }
+            })
+            .map(|_| ())
+            .unwrap_or_else(|e| tracing::warn!(error = %e, "could not start the watch thread"));
+
         Ok(watcher)
     }
 }

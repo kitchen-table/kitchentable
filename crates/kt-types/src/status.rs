@@ -47,8 +47,10 @@ pub struct SysStatus {
     pub workspace: String,
     pub serving: ServingState,
     pub app_count: u32,
-    /// Seconds since the daemon started.
-    pub uptime_secs: u64,
+    /// Seconds since the daemon started. `u32` rather than `u64` because
+    /// ts-rs maps 64-bit integers to `bigint`, which JSON cannot carry - and
+    /// 136 years of uptime is enough.
+    pub uptime_secs: u32,
 }
 
 #[cfg(test)]

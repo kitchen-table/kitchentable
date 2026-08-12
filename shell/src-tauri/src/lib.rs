@@ -1,24 +1,85 @@
 //! Kitchen Table desktop shell.
 //!
-//! The Rust side here stays deliberately dumb (docs/architecture.md section
-//! 13): window and tray management, native dialogs, autostart, the updater,
-//! spawning and supervising the daemon, and a bidirectional proxy between
-//! Tauri IPC and the daemon's Unix socket. All product logic renders in React
-//! from socket state.
-//!
-//! Scaffold status: window and tray only. Daemon supervision lands in D3.
+//! The Rust side stays deliberately dumb (docs/architecture.md section 13):
+//! window and tray management, spawning and supervising the daemon, and a
+//! proxy between Tauri IPC and the daemon's Unix socket. All product logic
+//! renders in React from socket state.
+
+use std::sync::Arc;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Manager, State,
 };
+
+mod daemon;
+mod socket;
+
+use daemon::Supervisor;
+
+struct AppState {
+    supervisor: Arc<Supervisor>,
+}
+
+/// The one command the UI needs: forward a JSON-RPC call to the daemon.
+///
+/// Deliberately generic. A command per method would mean editing Rust every
+/// time the socket API grows, and would tempt the shell into interpreting
+/// payloads it has no business understanding.
+#[tauri::command]
+fn kt_call(
+    method: String,
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, serde_json::Value> {
+    socket::call(&socket::socket_path(), &method, params).map_err(|e| {
+        // Not an error worth a stack trace: the daemon being down is a state
+        // the UI is designed to render.
+        tracing::debug!(method, error = %e, "socket call failed");
+        e.to_payload()
+    })
+}
+
+/// Whether the daemon is up, for the window's connection state.
+///
+/// Reports the socket's view first, since a daemon we adopted rather than
+/// spawned is healthy even though we have no child process for it.
+#[tauri::command]
+fn kt_health(state: State<'_, AppState>) -> serde_json::Value {
+    let ours = state.supervisor.is_alive();
+    let mut health = match socket::handshake(&socket::socket_path()) {
+        socket::Handshake::Ready => serde_json::json!({ "state": "ready" }),
+        socket::Handshake::NotRunning => serde_json::json!({ "state": "not_running" }),
+        socket::Handshake::WrongVersion { theirs, ours } => serde_json::json!({
+            "state": "wrong_version", "theirs": theirs, "ours": ours,
+        }),
+        socket::Handshake::Unhealthy(reason) => {
+            serde_json::json!({ "state": "unhealthy", "reason": reason })
+        }
+    };
+
+    if let Some(object) = health.as_object_mut() {
+        object.insert("we_started_it".into(), ours.into());
+    }
+    health
+}
+
+/// Restart the daemon, for the "try again" button on the disconnected state.
+#[tauri::command]
+fn kt_restart_daemon(state: State<'_, AppState>) -> Result<(), String> {
+    state.supervisor.stop();
+    state
+        .supervisor
+        .ensure_running()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
 
 /// Closing the window hides it; the daemon keeps serving. Quitting is an
 /// explicit choice from the tray (docs/architecture.md section 3).
-fn hide_instead_of_closing(window: &tauri::Window, api: &tauri::WindowEvent) {
-    if let tauri::WindowEvent::CloseRequested { api: close, .. } = api {
-        close.prevent_close();
+fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
         let _ = window.hide();
         tracing::debug!("window hidden; serving continues");
     }
@@ -26,10 +87,9 @@ fn hide_instead_of_closing(window: &tauri::Window, api: &tauri::WindowEvent) {
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Kitchen Table", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause", "Pause serving", false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Kitchen Table", true, Some("CmdOrCtrl+Q"))?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &sep, &quit])?;
 
     TrayIconBuilder::with_id("main")
         .icon(
@@ -37,18 +97,19 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 .cloned()
                 .expect("bundled app icon"),
         )
+        // A template image adopts the menu bar's own colour, so the icon works
+        // in both light and dark menu bars instead of being a coloured square.
+        .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
+            "open" => show_window(app),
+            "quit" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.supervisor.stop();
                 }
+                app.exit(0);
             }
-            // Wired to sys.pause_serving over the socket in D3.
-            "pause" => tracing::info!("pause serving requested"),
-            "quit" => app.exit(0),
             other => tracing::warn!(menu_item = other, "unhandled tray menu item"),
         })
         .build(app)?;
@@ -56,17 +117,46 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+fn show_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "kitchentable_shell_lib=info".into()),
         )
         .init();
 
+    let supervisor = Arc::new(Supervisor::new());
+
     tauri::Builder::default()
-        .setup(|app| {
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState {
+            supervisor: Arc::clone(&supervisor),
+        })
+        .invoke_handler(tauri::generate_handler![
+            kt_call,
+            kt_health,
+            kt_restart_daemon
+        ])
+        .setup(move |app| {
             build_tray(app.handle())?;
+
+            // Start the daemon off the main thread: the window should appear
+            // immediately and render its connecting state, not block on a
+            // process launch.
+            let supervisor = Arc::clone(&supervisor);
+            std::thread::spawn(move || match supervisor.ensure_running() {
+                Ok(started) => tracing::info!(started, "daemon ready"),
+                Err(e) => tracing::error!(error = %e, "could not start the daemon"),
+            });
+
             tracing::info!("shell started");
             Ok(())
         })

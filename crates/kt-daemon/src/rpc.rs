@@ -70,7 +70,7 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             workspace: ctx.workspace.clone(),
             serving: ctx.serving.clone(),
             app_count: ctx.library.len() as u32,
-            uptime_secs: ctx.started.elapsed().as_secs(),
+            uptime_secs: ctx.started.elapsed().as_secs() as u32,
         }),
 
         other => Err(KtError {
