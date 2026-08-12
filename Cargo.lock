@@ -505,6 +505,7 @@ name = "kt-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "kt-auth",
  "kt-mdns",
  "kt-registry",
  "kt-server",

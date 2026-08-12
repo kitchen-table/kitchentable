@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Path as AxumPath, State},
+    extract::{ConnectInfo, FromRequestParts, Path as AxumPath, State},
     http::{header, request::Parts, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -49,6 +49,47 @@ pub trait AppSource: Send + Sync + 'static {
     }
 }
 
+/// What the server needs from the trust layer to answer a request.
+///
+/// A trait so kt-server never touches the database directly: the daemon owns
+/// storage, and this crate stays a thing that turns requests into responses.
+pub trait TrustSource: Send + Sync + 'static {
+    /// The device behind this request, if its cookie verified.
+    fn device_for(&self, headers: &axum::http::HeaderMap) -> Option<kt_auth::Device>;
+
+    /// Whether this machine is currently on a network the owner marked as home.
+    fn on_household_network(&self) -> bool;
+
+    /// Redeem an invite for a device, registering it if new.
+    ///
+    /// Returns the cookie to set, and whether the device still needs the
+    /// owner's approval.
+    fn redeem(&self, token: &str, user_agent: &str) -> Result<Redemption, String>;
+
+    /// Note that a device asked for an app it cannot open yet, so the owner
+    /// gets an approval prompt.
+    fn request_access(&self, headers: &axum::http::HeaderMap, slug: &str) -> Redemption;
+
+    /// Record an access-log line.
+    fn log(&self, slug: &str, device: Option<&kt_auth::DeviceId>, action: &str);
+
+    /// A name for the person sharing, for the viewer pages.
+    fn owner_hint(&self) -> String {
+        "Someone".to_string()
+    }
+}
+
+/// The outcome of redeeming a link or asking for access.
+#[derive(Debug, Clone)]
+pub struct Redemption {
+    /// Set-Cookie value, if a session was minted.
+    pub cookie: Option<String>,
+    /// Where to go next.
+    pub app_slug: String,
+    /// True when the owner still has to approve.
+    pub pending: bool,
+}
+
 /// The `Host` header, or empty when there is none.
 ///
 /// Hand-rolled because axum 0.8 moved its own out to axum-extra, and this needs
@@ -71,6 +112,25 @@ impl<S: Send + Sync> FromRequestParts<S> for Host {
     }
 }
 
+/// The peer address, when the server was started with connect info.
+///
+/// Absent rather than fatal if it is missing: the only thing it grants is the
+/// owner's own-machine exemption, so losing it can refuse but never over-permit.
+struct Peer(Option<std::net::IpAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for Peer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Peer(
+            parts
+                .extensions
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip()),
+        ))
+    }
+}
+
 /// Strip the port and lowercase, since a Host header carries both cases and an
 /// optional `:port`.
 fn normalise_host(host: &str) -> String {
@@ -82,27 +142,152 @@ fn normalise_host(host: &str) -> String {
     without_port.trim().to_ascii_lowercase()
 }
 
-pub fn router<S: AppSource>(source: Arc<S>) -> Router {
+/// Both halves of what a request needs: what is being served, and who may see
+/// it.
+pub struct ServerState<S: AppSource, T: TrustSource> {
+    pub apps: Arc<S>,
+    pub trust: Arc<T>,
+}
+
+// Written out rather than derived: `#[derive(Clone)]` would demand `S: Clone`
+// and `T: Clone`, which is not true and not needed - both fields are already
+// behind an Arc, so cloning is two refcount bumps.
+impl<S: AppSource, T: TrustSource> Clone for ServerState<S, T> {
+    fn clone(&self) -> Self {
+        Self {
+            apps: Arc::clone(&self.apps),
+            trust: Arc::clone(&self.trust),
+        }
+    }
+}
+
+pub fn router<S: AppSource, T: TrustSource>(apps: Arc<S>, trust: Arc<T>) -> Router {
+    let state = ServerState { apps, trust };
+
     Router::new()
+        // Invite redemption lives on the app's own hostname so a shared link
+        // never bounces the viewer to another domain.
+        .route("/i/{token}", get(redeem::<S, T>))
         // A request whose Host header names an announced app is served from
         // that app's root, whatever the path says. Everything else falls
         // through to prefix routing below.
-        .route("/", get(root::<S>))
+        .route("/", get(root::<S, T>))
         // All three spellings are needed: a wildcard does not match an empty
         // tail, so `/trip-planner/` would 404 on the route below - and a
         // trailing slash is exactly what a link or a browser produces.
-        .route("/{slug}", get(serve_root::<S>))
-        .route("/{slug}/", get(serve_root::<S>))
-        .route("/{slug}/{*path}", get(serve_path::<S>))
-        .with_state(source)
+        .route("/{slug}", get(serve_root::<S, T>))
+        .route("/{slug}/", get(serve_root::<S, T>))
+        .route("/{slug}/{*path}", get(serve_path::<S, T>))
+        .with_state(state)
+}
+
+/// Redeem an invite link.
+///
+/// On success the viewer gets a session cookie and lands in the app, or on the
+/// wait page if the owner still has to approve. Every failure gets its own
+/// sentence: "invalid link" leaves someone with nothing to do.
+async fn redeem<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    headers: axum::http::HeaderMap,
+    AxumPath(token): AxumPath<String>,
+) -> Response {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    match state.trust.redeem(&token, user_agent) {
+        Ok(redemption) => {
+            let app_name = state
+                .apps
+                .get(&redemption.app_slug)
+                .map(|a| a.name)
+                .unwrap_or_else(|| redemption.app_slug.clone());
+
+            let body = if redemption.pending {
+                pages::waiting(&app_name, &state.trust.owner_hint())
+            } else {
+                pages::interstitial(&app_name, &state.trust.owner_hint())
+            };
+
+            let mut response = html(body);
+            if let Some(cookie) = redemption.cookie {
+                if let Ok(value) = cookie.parse() {
+                    response.headers_mut().insert(header::SET_COOKIE, value);
+                }
+            }
+            // The wait page refreshes onto the app root, so point it there.
+            if let Ok(value) = format!("/{}/", redemption.app_slug).parse() {
+                response.headers_mut().insert(header::REFRESH, value);
+            }
+            response
+        }
+        Err(reason) => {
+            (StatusCode::FORBIDDEN, html_body(pages::bad_invite(&reason))).into_response()
+        }
+    }
 }
 
 /// `/` means different things depending on who was asked for: an app's own
 /// hostname serves the app, anything else shows the index.
-async fn root<S: AppSource>(State(source): State<Arc<S>>, host: Host) -> Response {
-    match app_for_host(&*source, &host.0) {
-        Some(app) => serve_app(&app, "").await,
-        None => index(&*source).await,
+async fn root<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    headers: axum::http::HeaderMap,
+    peer: Peer,
+    host: Host,
+) -> Response {
+    match app_for_host(&*state.apps, &host.0) {
+        Some(app) => guarded(&state, &app, "", &headers, &peer).await,
+        None => index(&*state.apps).await,
+    }
+}
+
+/// Run the gate, then serve or show the appropriate page.
+///
+/// The single place a file is served from, so there is no path that reaches
+/// content without passing through here.
+async fn guarded<S: AppSource, T: TrustSource>(
+    state: &ServerState<S, T>,
+    app: &ServedApp,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    peer: &Peer,
+) -> Response {
+    let device = state.trust.device_for(headers);
+    let ctx = kt_auth::RequestContext {
+        session: None,
+        on_household_network: state.trust.on_household_network(),
+        // The owner's own browser must never have to pair with itself.
+        is_loopback: gate::is_loopback(peer.0),
+    };
+
+    match gate::gate(app.visibility, device.as_ref(), &ctx) {
+        gate::Gated::Serve => {
+            state
+                .trust
+                .log(&app.slug, device.as_ref().map(|d| &d.id), "opened");
+            serve_app(app, path).await
+        }
+        gate::Gated::Waiting => {
+            let redemption = state.trust.request_access(headers, &app.slug);
+            let mut response = html(pages::waiting(&app.name, &state.trust.owner_hint()));
+            if let Some(cookie) = redemption.cookie {
+                if let Ok(value) = cookie.parse() {
+                    response.headers_mut().insert(header::SET_COOKIE, value);
+                }
+            }
+            response
+        }
+        gate::Gated::Refused(reason) => {
+            state
+                .trust
+                .log(&app.slug, device.as_ref().map(|d| &d.id), "refused");
+            let body = match reason {
+                gate::Refusal::WrongNetwork => pages::wrong_network(&app.name),
+                gate::Refusal::NotShared | gate::Refusal::Revoked => pages::denied(&app.name),
+            };
+            (StatusCode::FORBIDDEN, html_body(body)).into_response()
+        }
     }
 }
 
@@ -136,39 +321,50 @@ async fn index<S: AppSource>(source: &S) -> Response {
     ))
 }
 
-async fn serve_root<S: AppSource>(
-    State(source): State<Arc<S>>,
+async fn serve_root<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    headers: axum::http::HeaderMap,
+    peer: Peer,
     host: Host,
     AxumPath(slug): AxumPath<String>,
 ) -> Response {
-    serve(&*source, &host.0, &slug, "").await
+    serve(&state, &host.0, &slug, "", &headers, &peer).await
 }
 
-async fn serve_path<S: AppSource>(
-    State(source): State<Arc<S>>,
+async fn serve_path<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    headers: axum::http::HeaderMap,
+    peer: Peer,
     host: Host,
     AxumPath((slug, path)): AxumPath<(String, String)>,
 ) -> Response {
-    serve(&*source, &host.0, &slug, &path).await
+    serve(&state, &host.0, &slug, &path, &headers, &peer).await
 }
 
-async fn serve<S: AppSource>(source: &S, host: &str, slug: &str, path: &str) -> Response {
+async fn serve<S: AppSource, T: TrustSource>(
+    state: &ServerState<S, T>,
+    host: &str,
+    slug: &str,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    peer: &Peer,
+) -> Response {
     // On an app's own hostname the whole path belongs to that app, so
     // `trip-planner.local/chores-rota/x` is a file lookup inside the trip
     // planner, never a way into another app.
-    if let Some(app) = app_for_host(source, host) {
+    if let Some(app) = app_for_host(&*state.apps, host) {
         let full = if path.is_empty() {
             slug.to_string()
         } else {
             format!("{slug}/{path}")
         };
-        return serve_app(&app, &full).await;
+        return guarded(state, &app, &full, headers, peer).await;
     }
 
-    let Some(app) = source.get(slug) else {
+    let Some(app) = state.apps.get(slug) else {
         return not_found("No app by that name is being served.");
     };
-    serve_app(&app, path).await
+    guarded(state, &app, path, headers, peer).await
 }
 
 async fn serve_app(app: &ServedApp, path: &str) -> Response {
@@ -218,6 +414,11 @@ fn html(body: String) -> Response {
         body,
     )
         .into_response()
+}
+
+/// An HTML body with its content type, for responses that are not 200.
+fn html_body(body: String) -> ([(header::HeaderName, &'static str); 1], String) {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
 }
 
 /// App names come from folder names on disk, so they are untrusted input as far

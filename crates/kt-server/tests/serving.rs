@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use kt_server::{router, AppSource, ServedApp};
+use kt_server::{router, AppSource, Redemption, ServedApp, TrustSource};
 use tower::ServiceExt;
 
 struct Fixture {
@@ -91,12 +91,36 @@ async fn get(fixture: Arc<Fixture>, uri: &str) -> (StatusCode, String, Option<St
     get_with_host(fixture, uri, "localhost").await
 }
 
+/// Lets every request straight through, so these tests stay about routing.
+/// The gate has its own matrix in kt-auth.
+struct AllowAll;
+
+impl TrustSource for AllowAll {
+    fn device_for(&self, _headers: &axum::http::HeaderMap) -> Option<kt_auth::Device> {
+        None
+    }
+    fn on_household_network(&self) -> bool {
+        true
+    }
+    fn redeem(&self, _token: &str, _ua: &str) -> Result<Redemption, String> {
+        Err("not used here".into())
+    }
+    fn request_access(&self, _headers: &axum::http::HeaderMap, slug: &str) -> Redemption {
+        Redemption {
+            cookie: None,
+            app_slug: slug.to_string(),
+            pending: true,
+        }
+    }
+    fn log(&self, _slug: &str, _device: Option<&kt_auth::DeviceId>, _action: &str) {}
+}
+
 async fn get_with_host(
     fixture: Arc<Fixture>,
     uri: &str,
     host: &str,
 ) -> (StatusCode, String, Option<String>) {
-    let response = router(fixture)
+    let response = router(fixture, Arc::new(AllowAll))
         .oneshot(
             Request::builder()
                 .uri(uri)

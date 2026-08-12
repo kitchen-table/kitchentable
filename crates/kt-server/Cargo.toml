@@ -17,5 +17,6 @@ tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 
 [dev-dependencies]
+kt-auth = { path = "../kt-auth" }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }

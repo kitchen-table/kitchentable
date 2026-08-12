@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum = "0.8.9"
+kt-auth = { version = "0.1.0", path = "../kt-auth" }
 kt-mdns = { version = "0.1.0", path = "../kt-mdns" }
 kt-registry = { version = "0.1.0", path = "../kt-registry" }
 kt-server = { version = "0.1.0", path = "../kt-server" }
@@ -20,3 +21,6 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+kt-mdns = { path = "../kt-mdns" }
