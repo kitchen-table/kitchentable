@@ -44,6 +44,33 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
 
+  shell:
+    name: Tauri shell (macOS)
+    # src-tauri is its own workspace root and needs system WebKit, so it is
+    # not covered by the `rust` job above. macOS only, per repo-architecture
+    # section 6.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shell/src-tauri
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: build the UI
+        # tauri.conf.json resolves frontendDist to ../ui/dist
+        run: pnpm -C shell/ui build
+      - name: fmt
+        working-directory: shell/src-tauri
+        run: cargo fmt --all --check
+      - name: clippy
+        working-directory: shell/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   ui:
     name: UI
     runs-on: ubuntu-latest

@@ -1,0 +1,26 @@
+[package]
+name = "kitchentable-shell"
+description = "Kitchen Table desktop shell: window, tray, and the IPC<->socket proxy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kitchen-table/kitchentable"
+rust-version = "1.85"
+
+# Deliberately its own workspace root. Tauri needs system WebKit, which the
+# Linux CI runner does not have; keeping it out of the root workspace means
+# `cargo build --workspace` stays pure Rust and cross-platform. The Tauri build
+# runs on macOS only (docs/repo-architecture.md section 6).
+[workspace]
+
+[lib]
+name = "kitchentable_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

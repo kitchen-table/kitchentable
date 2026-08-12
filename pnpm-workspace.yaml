@@ -1,0 +1,9 @@
+packages:
+  - shell
+  - shell/ui
+  - packages/*
+
+# pnpm 10 blocks dependency build scripts by default. esbuild's postinstall
+# links its platform binary, without which vite and vitest cannot run.
+onlyBuiltDependencies:
+  - esbuild

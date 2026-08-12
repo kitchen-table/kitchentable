@@ -1,0 +1,170 @@
+/*
+ * Kitchen Table design tokens.
+ *
+ * Lifted from the UI mockups so the palette has exactly one definition. Every
+ * colour in the app comes from here; no raw hex in components. Light is the
+ * base, dark overrides only what changes, and [data-theme] wins over the media
+ * query in both directions so an explicit user choice always beats the system.
+ *
+ * Font files are not bundled yet - the stacks below fall back to the system UI
+ * face until they are (checklist D3).
+ */
+
+:root {
+  --font-sans: "Schibsted Grotesk", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Surfaces, warm off-white */
+  --desk: #e7e1d6;
+  --paper: #fbfaf8;
+  --raised: #f0ece4;
+  --term: #1c1a15;
+
+  /* Ink, lightening */
+  --ink: #1a1a1a;
+  --ink2: #4a463f;
+  --ink3: #6b6b6b;
+  --muted: #8a8378;
+  --faint: #a8a091;
+
+  /* Accent */
+  --accent: #2f6df0;
+  --accent-h: #2a5fd0;
+  --accent-tint: #eef3fe;
+  --accent-bd: #dbe6fd;
+
+  /* Status */
+  --green: #2f9e6f;
+  --green-tint: #e9f6f0;
+  --gold: #b8862f;
+  --gold-tint: #f6efe1;
+  --danger: #c0392b;
+  --danger-tint: #fdf3f2;
+
+  /* Strict relay mode has its own colour so end-to-end never reads as ordinary */
+  --strict: #7a4de0;
+  --strict-tint: #f0ebfd;
+
+  /* Visibility levels. The wire value for Household stays `network`. */
+  --vis-private: #6b6b6b;
+  --vis-private-tint: #eeece8;
+  --vis-household: #b8862f;
+  --vis-household-tint: #f6efe1;
+  --vis-invited: #2f6df0;
+  --vis-invited-tint: #eef3fe;
+  --vis-public: #2f9e6f;
+  --vis-public-tint: #e9f6f0;
+
+  --chip: #eeece8;
+  --border: rgba(0, 0, 0, 0.08);
+  --border2: rgba(0, 0, 0, 0.12);
+
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --desk: #15130e;
+    --paper: #211f19;
+    --raised: #2b2822;
+
+    --ink: #f2ede3;
+    --ink2: #d8d2c6;
+    --ink3: #b2ab9d;
+    --muted: #918a7d;
+    --faint: #6f6a5e;
+
+    --accent: #5b8dff;
+    --accent-h: #7aa2ff;
+    --accent-tint: #1b2740;
+    --accent-bd: #2c3c5d;
+
+    --green: #42c088;
+    --green-tint: #16281e;
+    --gold: #d9a648;
+    --gold-tint: #2c2513;
+    --danger: #e26a5c;
+    --danger-tint: #2e1a17;
+
+    --strict: #a98cf0;
+    --strict-tint: #241a3a;
+
+    --vis-private: #b2ab9d;
+    --vis-private-tint: #312d26;
+    --vis-household: #d9a648;
+    --vis-household-tint: #2c2513;
+    --vis-invited: #5b8dff;
+    --vis-invited-tint: #1b2740;
+    --vis-public: #42c088;
+    --vis-public-tint: #16281e;
+
+    --chip: #312d26;
+    --border: rgba(255, 255, 255, 0.11);
+    --border2: rgba(255, 255, 255, 0.15);
+
+    color-scheme: dark;
+  }
+}
+
+[data-theme="dark"] {
+  --desk: #15130e;
+  --paper: #211f19;
+  --raised: #2b2822;
+
+  --ink: #f2ede3;
+  --ink2: #d8d2c6;
+  --ink3: #b2ab9d;
+  --muted: #918a7d;
+  --faint: #6f6a5e;
+
+  --accent: #5b8dff;
+  --accent-h: #7aa2ff;
+  --accent-tint: #1b2740;
+  --accent-bd: #2c3c5d;
+
+  --green: #42c088;
+  --green-tint: #16281e;
+  --gold: #d9a648;
+  --gold-tint: #2c2513;
+  --danger: #e26a5c;
+  --danger-tint: #2e1a17;
+
+  --strict: #a98cf0;
+  --strict-tint: #241a3a;
+
+  --vis-private: #b2ab9d;
+  --vis-private-tint: #312d26;
+  --vis-household: #d9a648;
+  --vis-household-tint: #2c2513;
+  --vis-invited: #5b8dff;
+  --vis-invited-tint: #1b2740;
+  --vis-public: #42c088;
+  --vis-public-tint: #16281e;
+
+  --chip: #312d26;
+  --border: rgba(255, 255, 255, 0.11);
+  --border2: rgba(255, 255, 255, 0.15);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
