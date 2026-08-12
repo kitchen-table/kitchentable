@@ -70,6 +70,12 @@ jobs:
       - name: clippy
         working-directory: shell/src-tauri
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: tauri build
+        # Compiles the app and, crucially, runs beforeBuildCommand - the only
+        # thing that exercises the config's relative paths. clippy alone does
+        # not, which is how a broken beforeDevCommand once reached main.
+        # --no-bundle skips the DMG; bundling belongs in release.yml.
+        run: pnpm -C shell tauri build --debug --no-bundle
 
   ui:
     name: UI
