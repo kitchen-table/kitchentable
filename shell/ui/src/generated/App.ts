@@ -7,9 +7,16 @@ import type { Visibility } from "./Visibility";
  */
 export type App = { slug: string, name: string, icon?: string, entry: string, visibility: Visibility, version: number, 
 /**
- * Friendly URL, e.g. `https://trip-planner.local`.
+ * Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
+ * prefix URL when nothing was announced.
  */
 url: string, 
+/**
+ * The name announced on the network, absent when mDNS is not live. The UI
+ * shows this next to the slug when they differ, so a renamed app does not
+ * look like a bug.
+ */
+hostname?: string, 
 /**
  * Always-available IP-and-port URL, for networks where mDNS does not
  * resolve. Android is the usual reason (docs/architecture.md section 10).

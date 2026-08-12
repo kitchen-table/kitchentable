@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use kt_mdns::{Announcement, Announcer};
 use kt_server::{AppSource, ServedApp};
 use kt_types::AppRecord;
 
@@ -18,6 +19,15 @@ pub struct Library {
 struct Entry {
     record: AppRecord,
     served: ServedApp,
+    /// The `<name>.local` this app answers to, when mDNS is live. Held so the
+    /// announcement is withdrawn if the app leaves the workspace.
+    announcement: Option<Announcement>,
+}
+
+impl Entry {
+    fn hostname(&self) -> Option<String> {
+        self.announcement.as_ref().map(|a| a.hostname())
+    }
 }
 
 impl Library {
@@ -30,7 +40,25 @@ impl Library {
     /// A folder whose path will not canonicalise is dropped with a warning
     /// rather than failing the swap: one bad app must not take the library
     /// down.
+    /// Replace the library without touching the network. Used by tests and by
+    /// any caller that has no announcer.
+    #[cfg(test)]
     pub fn replace(&self, records: Vec<AppRecord>) {
+        self.replace_announcing(records, None, None);
+    }
+
+    /// Replace the library, announcing each app on the network.
+    ///
+    /// Apps that were already announced keep their announcement rather than
+    /// being withdrawn and re-published, so a rescan does not make every phone
+    /// on the network re-resolve.
+    pub fn replace_announcing(
+        &self,
+        records: Vec<AppRecord>,
+        announcer: Option<&dyn Announcer>,
+        addr: Option<std::net::Ipv4Addr>,
+    ) {
+        let mut previous = std::mem::take(&mut *self.write());
         let mut next = HashMap::with_capacity(records.len());
 
         for record in records {
@@ -48,10 +76,52 @@ impl Library {
                 root,
                 entry: record.manifest.entry.clone(),
             };
-            next.insert(record.manifest.slug.clone(), Entry { record, served });
+
+            let slug = record.manifest.slug.clone();
+            let announcement = match previous.remove(&slug) {
+                // Already on the air; leave it alone.
+                Some(existing) if existing.announcement.is_some() => existing.announcement,
+                _ => match (announcer, addr) {
+                    (Some(announcer), Some(addr)) => match announcer.announce(&slug, addr) {
+                        Ok(a) => {
+                            if a.was_renamed() {
+                                tracing::warn!(
+                                    requested = %a.requested,
+                                    registered = %a.registered,
+                                    "name taken on this network, using a suffix"
+                                );
+                            }
+                            Some(a)
+                        }
+                        // Announcing is best-effort: the app is still reachable
+                        // by prefix and by IP, so a failure degrades rather
+                        // than removing the app.
+                        Err(e) => {
+                            tracing::warn!(slug = %slug, error = %e, "could not announce");
+                            None
+                        }
+                    },
+                    _ => None,
+                },
+            };
+
+            next.insert(
+                slug,
+                Entry {
+                    record,
+                    served,
+                    announcement,
+                },
+            );
         }
 
+        // Anything left in `previous` has gone; dropping it withdraws its name.
         *self.write() = next;
+    }
+
+    /// The announced hostname for an app, if it has one.
+    pub fn hostname(&self, slug: &str) -> Option<String> {
+        self.read().get(slug).and_then(Entry::hostname)
     }
 
     pub fn records(&self) -> Vec<AppRecord> {
@@ -90,6 +160,13 @@ impl Library {
 impl AppSource for Library {
     fn get(&self, slug: &str) -> Option<ServedApp> {
         self.read().get(slug).map(|e| e.served.clone())
+    }
+
+    fn get_by_hostname(&self, hostname: &str) -> Option<ServedApp> {
+        self.read()
+            .values()
+            .find(|e| e.hostname().as_deref() == Some(hostname))
+            .map(|e| e.served.clone())
     }
 
     fn list(&self) -> Vec<ServedApp> {
@@ -144,6 +221,65 @@ mod tests {
         library.replace(vec![record("a", "A", &dir)]);
         assert_eq!(library.len(), 1);
         assert!(library.get("b").is_none());
+    }
+
+    #[test]
+    fn an_announced_app_is_reachable_by_its_hostname() {
+        let dir = std::env::temp_dir().display().to_string();
+        let announcer = kt_mdns::MockAnnouncer::new();
+        let library = Library::new();
+
+        library.replace_announcing(
+            vec![record("trip", "Trip", &dir)],
+            Some(&announcer),
+            Some(std::net::Ipv4Addr::LOCALHOST),
+        );
+
+        assert_eq!(library.hostname("trip").as_deref(), Some("trip.local"));
+        assert!(library.get_by_hostname("trip.local").is_some());
+        assert!(library.get_by_hostname("other.local").is_none());
+    }
+
+    #[test]
+    fn a_rescan_does_not_re_announce_what_is_already_on_the_air() {
+        let dir = std::env::temp_dir().display().to_string();
+        let announcer = kt_mdns::MockAnnouncer::new();
+        let library = Library::new();
+        let records = vec![record("trip", "Trip", &dir)];
+
+        library.replace_announcing(
+            records.clone(),
+            Some(&announcer),
+            Some(std::net::Ipv4Addr::LOCALHOST),
+        );
+        library.replace_announcing(
+            records,
+            Some(&announcer),
+            Some(std::net::Ipv4Addr::LOCALHOST),
+        );
+
+        assert_eq!(
+            announcer.announced(),
+            ["trip"],
+            "re-announcing would make every phone on the network re-resolve"
+        );
+    }
+
+    #[test]
+    fn an_app_that_cannot_be_announced_is_still_served() {
+        let dir = std::env::temp_dir().display().to_string();
+        let announcer = kt_mdns::MockAnnouncer::new().failing("no permission");
+        let library = Library::new();
+
+        library.replace_announcing(
+            vec![record("trip", "Trip", &dir)],
+            Some(&announcer),
+            Some(std::net::Ipv4Addr::LOCALHOST),
+        );
+
+        assert_eq!(library.len(), 1, "mDNS failing must not remove the app");
+        assert!(library.get("trip").is_some());
+        assert_eq!(library.hostname("trip"), None);
     }
 
     #[test]

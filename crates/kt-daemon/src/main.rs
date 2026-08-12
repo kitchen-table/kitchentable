@@ -11,7 +11,7 @@ use std::time::Instant;
 use kt_registry::Registry;
 use kt_server::AppSource;
 use kt_store::Store;
-use kt_types::{paths, DegradedReason, ServingState};
+use kt_types::{paths, DegradedReason, ServingState, Urls};
 
 mod library;
 mod rpc;
@@ -42,8 +42,9 @@ enum StartupError {
 async fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kt_daemon=info,kt_registry=info,kt_store=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "kt_daemon=info,kt_registry=info,kt_store=info,kt_mdns=info,kt_server=info".into()
+            }),
         )
         .init();
 
@@ -71,22 +72,50 @@ async fn run() -> Result<(), StartupError> {
     let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
     let library = Arc::new(Library::new());
 
-    // Bring the library up from disk before serving anything, so the first
-    // request never races the first scan.
-    sync(&registry, &store, &library);
+    let (listener, port, port_degraded) = bind_http().await?;
 
-    let (listener, port, degraded) = bind_http().await?;
-    let origin = origin_for("localhost", port);
-    let fallback_origin = origin_for("127.0.0.1", port);
+    // Announce every app on the network before anything else can ask for a
+    // URL, so app.list never reports a hostname that is not yet on the air.
+    let announcer = kt_mdns::for_this_platform();
+    let addr = kt_mdns::primary_ipv4();
+    if addr.is_none() {
+        tracing::warn!("no network address found; apps are reachable on this machine only");
+    }
+    let mdns_live = announcer.is_live() && addr.is_some();
 
-    let serving = match degraded {
-        None => ServingState::Serving,
-        Some(reason) => ServingState::Degraded {
+    let urls = Urls {
+        scheme: "http".to_string(),
+        hostname: None, // filled per app from the library
+        port_suffix: if port == 80 {
+            String::new()
+        } else {
+            format!(":{port}")
+        },
+        prefix_origin: origin_for("localhost", port),
+        fallback_origin: origin_for(
+            &addr
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "127.0.0.1".into()),
+            port,
+        ),
+    };
+
+    announce_all(&registry, &store, &library, announcer.as_ref(), addr);
+
+    let serving = match (port_degraded, mdns_live) {
+        (Some(reason), _) => ServingState::Degraded {
             reason,
             message: format!(
                 "Port 80 was already in use, so apps are served on port {port} for now."
             ),
         },
+        (None, false) => ServingState::Degraded {
+            reason: DegradedReason::MdnsUnavailable,
+            message: "Friendly .local names are not available, so apps are reachable \
+                      by IP address instead."
+                .to_string(),
+        },
+        (None, true) => ServingState::Serving,
     };
 
     let socket_path = paths::socket_path(&home);
@@ -95,8 +124,7 @@ async fn run() -> Result<(), StartupError> {
     let ctx = Arc::new(rpc::Context {
         library: Arc::clone(&library),
         workspace: workspace.display().to_string(),
-        origin: origin.clone(),
-        fallback_origin,
+        urls: urls.clone(),
         serving,
         started: Instant::now(),
     });
@@ -107,14 +135,17 @@ async fn run() -> Result<(), StartupError> {
         let registry = Registry::new(&workspace);
         let store = Arc::clone(&store);
         let library = Arc::clone(&library);
-        Registry::new(&workspace).watch(move || sync(&registry, &store, &library))?
+        let announcer = Arc::from(kt_mdns::for_this_platform());
+        Registry::new(&workspace)
+            .watch(move || announce_all(&registry, &store, &library, &*announcer, addr))?
     };
 
     tracing::info!(
         workspace = %workspace.display(),
         socket = %socket_path.display(),
         apps = library.len(),
-        %origin,
+        origin = %urls.prefix_origin,
+        mdns = mdns_live,
         "kitchen table is serving"
     );
 
@@ -135,11 +166,28 @@ async fn run() -> Result<(), StartupError> {
     Ok(())
 }
 
+/// Rescan, persist, and announce.
+fn announce_all(
+    registry: &Registry,
+    store: &Store,
+    library: &Library,
+    announcer: &dyn kt_mdns::Announcer,
+    addr: Option<std::net::Ipv4Addr>,
+) {
+    sync_with(registry, store, library, Some(announcer), addr)
+}
+
 /// Rescan the workspace and make the store and the live library agree.
 ///
 /// Infallible by design: a transient filesystem error must not take serving
 /// down, so it is logged and the previous library keeps serving.
-fn sync(registry: &Registry, store: &Store, library: &Library) {
+fn sync_with(
+    registry: &Registry,
+    store: &Store,
+    library: &Library,
+    announcer: Option<&dyn kt_mdns::Announcer>,
+    addr: Option<std::net::Ipv4Addr>,
+) {
     let records = match registry.scan() {
         Ok(records) => records,
         Err(e) => {
@@ -162,7 +210,7 @@ fn sync(registry: &Registry, store: &Store, library: &Library) {
     }
 
     let before = library.list().len();
-    library.replace(records);
+    library.replace_announcing(records, announcer, addr);
     let after = library.len();
     if before != after {
         tracing::info!(apps = after, "library updated");
