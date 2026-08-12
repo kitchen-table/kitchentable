@@ -11,6 +11,9 @@ use kt_types::{AppManifest, AppRecord, Visibility};
 use rusqlite::{params, Connection, OptionalExtension};
 
 mod migrations;
+mod trust;
+
+pub use trust::AccessEvent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -22,6 +25,8 @@ pub enum StoreError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("stored {kind} {value:?} is not the shape we mint")]
+    CorruptIdentifier { kind: &'static str, value: String },
     #[error("could not create {path}: {source}")]
     CreateDir {
         path: String,
@@ -154,7 +159,7 @@ impl Store {
     /// A poisoned mutex means a previous caller panicked mid-statement; the
     /// connection itself is still sound, so recovering beats taking the process
     /// down.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

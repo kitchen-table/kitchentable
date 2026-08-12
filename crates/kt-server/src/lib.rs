@@ -18,6 +18,8 @@ use axum::{
     Router,
 };
 
+pub mod gate;
+pub mod pages;
 pub mod paths;
 
 /// What the server needs to know to serve one app.
@@ -28,6 +30,7 @@ pub struct ServedApp {
     /// Canonicalised once at registration, never per request.
     pub root: PathBuf,
     pub entry: String,
+    pub visibility: kt_types::Visibility,
 }
 
 /// Snapshot of what is currently servable. Swapped wholesale when the registry

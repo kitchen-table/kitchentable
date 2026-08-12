@@ -75,6 +75,7 @@ impl Library {
                 name: record.manifest.name.clone(),
                 root,
                 entry: record.manifest.entry.clone(),
+                visibility: record.manifest.visibility,
             };
 
             let slug = record.manifest.slug.clone();
