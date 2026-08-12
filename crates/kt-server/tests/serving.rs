@@ -39,13 +39,25 @@ impl Fixture {
         // A file outside any app, to prove traversal cannot reach it.
         std::fs::write(dir.join("secret.txt"), "PRIVATE").expect("writes");
 
+        let chores = dir.join("chores");
+        std::fs::create_dir_all(&chores).expect("creates dirs");
+        std::fs::write(chores.join("index.html"), "<h1>chores</h1>").expect("writes");
+
         Self {
-            apps: vec![ServedApp {
-                slug: "trip".into(),
-                name: "Trip Planner".into(),
-                root: root.canonicalize().expect("canonicalises"),
-                entry: "index.html".into(),
-            }],
+            apps: vec![
+                ServedApp {
+                    slug: "trip".into(),
+                    name: "Trip Planner".into(),
+                    root: root.canonicalize().expect("canonicalises"),
+                    entry: "index.html".into(),
+                },
+                ServedApp {
+                    slug: "chores".into(),
+                    name: "Chores Rota".into(),
+                    root: chores.canonicalize().expect("canonicalises"),
+                    entry: "index.html".into(),
+                },
+            ],
             dir,
         }
     }
@@ -64,13 +76,29 @@ impl AppSource for Fixture {
     fn list(&self) -> Vec<ServedApp> {
         self.apps.clone()
     }
+    fn get_by_hostname(&self, hostname: &str) -> Option<ServedApp> {
+        // The daemon keeps the real map; here the announced name is the slug
+        // plus `.local`, plus one deliberately renamed app.
+        let slug = hostname.strip_suffix(".local")?;
+        let slug = if slug == "chores-2" { "chores" } else { slug };
+        self.get(slug)
+    }
 }
 
 async fn get(fixture: Arc<Fixture>, uri: &str) -> (StatusCode, String, Option<String>) {
+    get_with_host(fixture, uri, "localhost").await
+}
+
+async fn get_with_host(
+    fixture: Arc<Fixture>,
+    uri: &str,
+    host: &str,
+) -> (StatusCode, String, Option<String>) {
     let response = router(fixture)
         .oneshot(
             Request::builder()
                 .uri(uri)
+                .header("host", host)
                 .body(Body::empty())
                 .expect("builds request"),
         )
@@ -171,4 +199,87 @@ async fn a_refusal_is_indistinguishable_from_a_miss() {
 
     assert_eq!(escape_status, miss_status);
     assert_eq!(escape_body, miss_body);
+}
+
+// ---- host-based routing ----
+
+#[tokio::test]
+async fn an_app_hostname_serves_that_app_at_the_root() {
+    let f = Arc::new(Fixture::new());
+    let (status, body, _) = get_with_host(f, "/", "trip.local").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "<h1>home</h1>", "the app owns its own origin");
+}
+
+#[tokio::test]
+async fn a_host_header_is_matched_case_insensitively_and_without_the_port() {
+    let f = Arc::new(Fixture::new());
+
+    for host in [
+        "trip.local",
+        "TRIP.local",
+        "Trip.Local:80",
+        "trip.local:8420",
+    ] {
+        let (status, body, _) = get_with_host(Arc::clone(&f), "/", host).await;
+        assert_eq!(status, StatusCode::OK, "{host} should route");
+        assert_eq!(body, "<h1>home</h1>", "{host} should route");
+    }
+}
+
+#[tokio::test]
+async fn paths_are_relative_to_the_app_on_its_own_hostname() {
+    let f = Arc::new(Fixture::new());
+    let (status, body, _) = get_with_host(f, "/sub/", "trip.local").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "<h1>sub</h1>");
+}
+
+#[tokio::test]
+async fn one_app_hostname_cannot_reach_another_app() {
+    // The isolation property host routing exists for: on trip.local, a path
+    // that looks like another app's prefix is just a missing file, not a way in.
+    let f = Arc::new(Fixture::new());
+    let (status, _, _) = get_with_host(f, "/chores/index.html", "trip.local").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_renamed_app_is_reachable_at_the_name_it_actually_got() {
+    // A name conflict on the network suffixes the hostname, so the announced
+    // name and the slug diverge. Both have to work.
+    let f = Arc::new(Fixture::new());
+
+    let (status, _, _) = get_with_host(Arc::clone(&f), "/", "chores-2.local").await;
+    assert_eq!(status, StatusCode::OK, "the announced name must resolve");
+
+    let (status, _, _) = get_with_host(f, "/chores/", "localhost").await;
+    assert_eq!(status, StatusCode::OK, "the slug prefix must still work");
+}
+
+#[tokio::test]
+async fn an_unknown_host_falls_back_to_prefix_routing() {
+    let f = Arc::new(Fixture::new());
+
+    let (status, body, _) = get_with_host(Arc::clone(&f), "/", "some-mac.local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Trip Planner"), "should be the index");
+
+    let (status, body, _) = get_with_host(f, "/trip/", "some-mac.local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "<h1>home</h1>");
+}
+
+#[tokio::test]
+async fn traversal_is_refused_on_an_app_hostname_too() {
+    let f = Arc::new(Fixture::new());
+
+    for uri in ["/../secret.txt", "/sub/../../secret.txt"] {
+        let (status, body, _) = get_with_host(Arc::clone(&f), uri, "trip.local").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} should be refused");
+        assert!(!body.contains("PRIVATE"), "{uri} leaked");
+    }
 }

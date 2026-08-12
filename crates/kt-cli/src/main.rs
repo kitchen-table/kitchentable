@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use kt_types::{paths, App, ServingState};
 
 mod client;
+mod qr;
 mod table;
 
 use client::{Client, ClientError};
@@ -18,6 +19,7 @@ kt - a home for your small software
 
 Usage:
   kt list        Everything in your workspace, and where to reach it
+  kt url <app>   The app's URL, with a QR code to point a phone at
   kt status      Whether the daemon is serving, and from which folder
   kt help        This message
 ";
@@ -28,6 +30,16 @@ fn main() -> ExitCode {
 
     let result = match command {
         "list" | "ls" => run(list),
+        "url" => match args.get(1) {
+            Some(slug) => {
+                let slug = slug.clone();
+                run(move |c| url(c, &slug))
+            }
+            None => {
+                eprintln!("kt url: which app?\n\n  kt url trip-planner\n");
+                return ExitCode::from(2);
+            }
+        },
         "status" => run(status),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
@@ -76,6 +88,27 @@ fn list(client: &mut Client) -> Result<(), ClientError> {
         .collect();
 
     table::print(["APP", "VISIBILITY", "VERSION", "URL"], &rows);
+    Ok(())
+}
+
+/// The URL and a scannable code. The QR is the point: it is how an app gets
+/// from a laptop to a phone without anyone typing anything.
+fn url(client: &mut Client, slug: &str) -> Result<(), ClientError> {
+    let app: App =
+        serde_json::from_value(client.call("app.get", Some(serde_json::json!({ "slug": slug })))?)?;
+
+    println!();
+    println!("{}", qr::render(&app.url));
+    println!("  {}", app.url);
+    if app.url != app.fallback_url {
+        println!("  {}   (if .local does not resolve)", app.fallback_url);
+    }
+    if let Some(hostname) = &app.hostname {
+        if !hostname.starts_with(&app.slug) {
+            println!("  announced as {hostname} - the name you wanted was taken");
+        }
+    }
+    println!();
     Ok(())
 }
 

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use kt_types::{
     protocol::{ResponsePayload, PROTOCOL_VERSION},
-    ErrorCode, KtError, Request, Response, ServingState, SysStatus,
+    ErrorCode, KtError, Request, Response, ServingState, SysStatus, Urls,
 };
 
 use crate::library::Library;
@@ -16,10 +16,21 @@ use crate::library::Library;
 pub struct Context {
     pub library: Arc<Library>,
     pub workspace: String,
-    pub origin: String,
-    pub fallback_origin: String,
+    /// URL shape for this run, minus the per-app hostname, which comes from
+    /// the library because only it knows what was actually announced.
+    pub urls: Urls,
     pub serving: ServingState,
     pub started: Instant,
+}
+
+impl Context {
+    /// URLs for one app, with its announced hostname filled in.
+    fn urls_for(&self, slug: &str) -> Urls {
+        Urls {
+            hostname: self.library.hostname(slug),
+            ..self.urls.clone()
+        }
+    }
 }
 
 /// Dispatch one request. Never panics and never returns `Err`: a failure is a
@@ -38,7 +49,7 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
                 .library
                 .records()
                 .iter()
-                .map(|r| r.to_app(&ctx.origin, &ctx.fallback_origin))
+                .map(|r| r.to_app(&ctx.urls_for(&r.manifest.slug)))
                 .collect();
             json(&apps)
         }
@@ -50,7 +61,7 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
                 message: format!("no app with slug {slug:?}"),
                 detail: None,
             })?;
-            json(&record.to_app(&ctx.origin, &ctx.fallback_origin))
+            json(&record.to_app(&ctx.urls_for(&slug)))
         }
 
         "sys.status" => json(&SysStatus {
@@ -125,8 +136,13 @@ mod tests {
         Context {
             library,
             workspace: dir,
-            origin: "http://localhost:8420".into(),
-            fallback_origin: "http://192.168.1.24:8420".into(),
+            urls: Urls {
+                scheme: "http".into(),
+                hostname: None,
+                port_suffix: ":8420".into(),
+                prefix_origin: "http://localhost:8420".into(),
+                fallback_origin: "http://192.168.1.24:8420".into(),
+            },
             serving: ServingState::Serving,
             started: Instant::now(),
         }

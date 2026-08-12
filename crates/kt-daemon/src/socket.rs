@@ -152,8 +152,13 @@ mod tests {
         Arc::new(Context {
             library: Arc::new(crate::library::Library::new()),
             workspace: "/tmp/ws".into(),
-            origin: "http://localhost:8420".into(),
-            fallback_origin: "http://127.0.0.1:8420".into(),
+            urls: kt_types::Urls {
+                scheme: "http".into(),
+                hostname: None,
+                port_suffix: ":8420".into(),
+                prefix_origin: "http://localhost:8420".into(),
+                fallback_origin: "http://127.0.0.1:8420".into(),
+            },
             serving: ServingState::Serving,
             started: Instant::now(),
         })

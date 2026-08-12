@@ -86,10 +86,16 @@ pub struct AppRecord {
 }
 
 impl AppRecord {
-    /// Derive the client-facing view. `origin` is the daemon's HTTP origin for
-    /// this run, e.g. `http://localhost:8420`.
-    pub fn to_app(&self, origin: &str, fallback_origin: &str) -> App {
+    /// Derive the client-facing view.
+    ///
+    /// `hostname` is the name actually announced on the network, which may be
+    /// suffixed if another device already had it. When there is none - mDNS
+    /// unavailable, permission denied, or an unsupported platform - the app is
+    /// still reachable by prefix, so the URL falls back rather than vanishing.
+    pub fn to_app(&self, urls: &Urls) -> App {
         let m = &self.manifest;
+        let prefix_url = format!("{}/{}", urls.prefix_origin, m.slug);
+
         App {
             slug: m.slug.clone(),
             name: m.name.clone(),
@@ -97,11 +103,30 @@ impl AppRecord {
             entry: m.entry.clone(),
             visibility: m.visibility,
             version: m.version,
-            url: format!("{origin}/{}", m.slug),
-            fallback_url: format!("{fallback_origin}/{}", m.slug),
+            url: match &urls.hostname {
+                Some(host) => format!("{}://{host}{}", urls.scheme, urls.port_suffix),
+                None => prefix_url.clone(),
+            },
+            hostname: urls.hostname.clone(),
+            fallback_url: format!("{}/{}", urls.fallback_origin, m.slug),
             path: self.path.clone(),
         }
     }
+}
+
+/// How to address one app this run.
+#[derive(Debug, Clone, Default)]
+pub struct Urls {
+    /// `http` now; `https` once the local CA is trusted (D7).
+    pub scheme: String,
+    /// The announced `<name>.local`, if mDNS is live.
+    pub hostname: Option<String>,
+    /// `:8420`, or empty on the default port.
+    pub port_suffix: String,
+    /// Origin for prefix routing, e.g. `http://localhost`.
+    pub prefix_origin: String,
+    /// Origin that always resolves: the machine's IP and port.
+    pub fallback_origin: String,
 }
 
 /// An app as clients see it: the manifest plus what the daemon knows about
@@ -117,8 +142,15 @@ pub struct App {
     pub entry: String,
     pub visibility: Visibility,
     pub version: u32,
-    /// Friendly URL, e.g. `https://trip-planner.local`.
+    /// Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
+    /// prefix URL when nothing was announced.
     pub url: String,
+    /// The name announced on the network, absent when mDNS is not live. The UI
+    /// shows this next to the slug when they differ, so a renamed app does not
+    /// look like a bug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hostname: Option<String>,
     /// Always-available IP-and-port URL, for networks where mDNS does not
     /// resolve. Android is the usual reason (docs/architecture.md section 10).
     pub fallback_url: String,
@@ -129,6 +161,61 @@ pub struct App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn urls(hostname: Option<&str>) -> Urls {
+        Urls {
+            scheme: "http".into(),
+            hostname: hostname.map(str::to_string),
+            port_suffix: String::new(),
+            prefix_origin: "http://localhost".into(),
+            fallback_origin: "http://192.168.1.24:8420".into(),
+        }
+    }
+
+    fn record() -> AppRecord {
+        AppRecord {
+            manifest: AppManifest {
+                name: "Trip Planner".into(),
+                slug: "trip-planner".into(),
+                icon: None,
+                entry: "index.html".into(),
+                visibility: Visibility::Private,
+                version: 1,
+                extra: serde_json::Map::new(),
+            },
+            path: "/ws/trip".into(),
+        }
+    }
+
+    #[test]
+    fn an_announced_app_gets_its_own_hostname_url() {
+        let app = record().to_app(&urls(Some("trip-planner.local")));
+        assert_eq!(app.url, "http://trip-planner.local");
+        assert_eq!(app.hostname.as_deref(), Some("trip-planner.local"));
+    }
+
+    #[test]
+    fn without_mdns_the_url_falls_back_to_a_prefix_rather_than_vanishing() {
+        let app = record().to_app(&urls(None));
+        assert_eq!(app.url, "http://localhost/trip-planner");
+        assert_eq!(app.hostname, None);
+    }
+
+    #[test]
+    fn the_fallback_url_is_always_an_address_that_resolves() {
+        // Whatever else happens, there is a URL a phone can open.
+        for hostname in [Some("trip-planner.local"), None] {
+            let app = record().to_app(&urls(hostname));
+            assert_eq!(app.fallback_url, "http://192.168.1.24:8420/trip-planner");
+        }
+    }
+
+    #[test]
+    fn a_non_default_port_is_carried_into_the_hostname_url() {
+        let mut u = urls(Some("trip-planner.local"));
+        u.port_suffix = ":8420".into();
+        assert_eq!(record().to_app(&u).url, "http://trip-planner.local:8420");
+    }
 
     #[test]
     fn a_bare_manifest_gets_sensible_defaults() {
