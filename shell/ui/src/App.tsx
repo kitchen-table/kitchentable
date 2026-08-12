@@ -1,14 +1,16 @@
 import { Mark } from "./Mark";
+import { StatusPill } from "./StatusPill";
+import type { ServingState } from "./generated";
 
 /**
  * Scaffold shell (checklist D0).
  *
  * Everything visible in this app is rendered from daemon socket state. The
- * socket does not exist yet, so the honest thing to show is the state the app
- * will genuinely be in whenever the daemon is down - which is a real state
- * worth designing, not a placeholder.
+ * socket does not exist yet, so `serving` is undefined and the app shows the
+ * disconnected state - which is a real state worth designing, not a
+ * placeholder. D3 replaces the prop with a live subscription.
  */
-export function App() {
+export function App({ serving }: { serving?: ServingState }) {
   return (
     <main
       style={{
@@ -34,31 +36,11 @@ export function App() {
           color: "var(--ink3)",
         }}
       >
-        Waiting for the daemon. Once it is up, your workspace and everything you
-        are serving appears here.
+        {serving
+          ? "Your workspace and everything you are serving appears here."
+          : "Waiting for the daemon. Once it is up, your workspace and everything you are serving appears here."}
       </p>
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "6px 12px",
-          borderRadius: 999,
-          background: "var(--chip)",
-          font: "500 11px var(--font-mono)",
-          color: "var(--muted)",
-        }}
-      >
-        <span
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: "50%",
-            background: "var(--faint)",
-          }}
-        />
-        not connected
-      </span>
+      <StatusPill serving={serving} />
     </main>
   );
 }

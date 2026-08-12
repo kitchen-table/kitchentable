@@ -8,3 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+ts-rs = "12.0.1"
