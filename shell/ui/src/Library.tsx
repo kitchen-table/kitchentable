@@ -8,7 +8,15 @@ import { VISIBILITY, VISIBILITY_ORDER, tileColour } from "./visibility";
  * A sidebar of filters, a grid of app cards, and a drop target. Everything
  * here renders from `app.list`; the component holds no state the daemon owns.
  */
-export function Library({ apps, workspace }: { apps: App[]; workspace: string }) {
+export function Library({
+  apps,
+  workspace,
+  onShare,
+}: {
+  apps: App[];
+  workspace: string;
+  onShare?: (app: App) => void;
+}) {
   const [filter, setFilter] = useState<Visibility | null>(null);
 
   const counts = useMemo(() => {
@@ -60,7 +68,7 @@ export function Library({ apps, workspace }: { apps: App[]; workspace: string })
           </p>
         </header>
 
-        {apps.length === 0 ? <EmptyWorkspace /> : <Grid apps={shown} />}
+        {apps.length === 0 ? <EmptyWorkspace /> : <Grid apps={shown} onShare={onShare} />}
       </section>
     </div>
   );
@@ -208,7 +216,7 @@ function Row({
   );
 }
 
-function Grid({ apps }: { apps: App[] }) {
+function Grid({ apps, onShare }: { apps: App[]; onShare?: (app: App) => void }) {
   if (apps.length === 0) {
     return (
       <p style={{ font: "400 14px var(--font-sans)", color: "var(--ink3)" }}>
@@ -226,13 +234,13 @@ function Grid({ apps }: { apps: App[] }) {
       }}
     >
       {apps.map((app) => (
-        <Card key={app.slug} app={app} />
+        <Card key={app.slug} app={app} onShare={onShare} />
       ))}
     </div>
   );
 }
 
-function Card({ app }: { app: App }) {
+function Card({ app, onShare }: { app: App; onShare?: (app: App) => void }) {
   const vis = VISIBILITY[app.visibility];
   // Anything other than exactly `<slug>.local` means the network already had
   // that name and we were suffixed. Say so on the card rather than letting the
@@ -309,10 +317,25 @@ function Card({ app }: { app: App }) {
         <span style={{ font: "500 10.5px var(--font-mono)", color: "var(--muted)" }}>
           v{app.version}
         </span>
+        {onShare && (
+          <button
+            type="button"
+            onClick={() => onShare(app)}
+            style={{
+              marginLeft: "auto",
+              border: "none",
+              background: "none",
+              cursor: "pointer",
+              font: "600 11.5px var(--font-sans)",
+              color: "var(--accent)",
+            }}
+          >
+            Share
+          </button>
+        )}
         {renamed && (
           <span
             style={{
-              marginLeft: "auto",
               font: "500 10px var(--font-mono)",
               color: "var(--gold)",
             }}

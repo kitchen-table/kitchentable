@@ -16,6 +16,7 @@ use kt_types::{paths, DegradedReason, ServingState, Urls};
 mod library;
 mod rpc;
 mod socket;
+mod trust;
 
 use library::Library;
 
@@ -91,6 +92,12 @@ async fn run() -> Result<(), StartupError> {
     let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
     let library = Arc::new(Library::new());
 
+    // Session keys live in the Keychain from D7; until then they are
+    // regenerated each start, which means sessions do not survive a restart.
+    // Safe, and visible: a viewer simply pairs again.
+    let keys = Arc::new(kt_auth::SessionKeys::generate());
+    let trust = Arc::new(trust::Trust::new(Arc::clone(&store), keys));
+
     let (listener, port, port_degraded) = bind_http().await?;
 
     // Announce every app on the network before anything else can ask for a
@@ -148,6 +155,7 @@ async fn run() -> Result<(), StartupError> {
 
     let ctx = Arc::new(rpc::Context {
         library: Arc::clone(&library),
+        store: Arc::clone(&store),
         workspace: workspace.display().to_string(),
         urls: urls.clone(),
         serving,
@@ -179,8 +187,11 @@ async fn run() -> Result<(), StartupError> {
     );
 
     let http = tokio::spawn(async move {
-        let app = kt_server::router(library);
-        if let Err(e) = axum::serve(listener, app).await {
+        let app = kt_server::router(library, trust);
+        // with_connect_info, or the peer address never reaches the gate and
+        // the owner's own browser would be asked to pair with itself.
+        let service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        if let Err(e) = axum::serve(listener, service).await {
             tracing::error!(error = %e, "http server stopped");
         }
     });

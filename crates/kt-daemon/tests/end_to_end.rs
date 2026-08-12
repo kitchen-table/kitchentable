@@ -153,6 +153,48 @@ impl Daemon {
         (status, body.to_string())
     }
 
+    /// Connect from the machine's real LAN address rather than 127.0.0.1, so
+    /// the request is not treated as the owner's own browser. This is the only
+    /// way to exercise the gate over a real socket.
+    fn get_as_stranger(&self, path: &str) -> (u16, String) {
+        use std::net::TcpStream;
+
+        let Some(addr) = kt_mdns::primary_ipv4() else {
+            // No network at all: skip rather than fail, so an isolated CI
+            // runner does not report a false problem.
+            return (0, String::new());
+        };
+
+        let mut stream = TcpStream::connect((addr, self.port)).expect("connects");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("sets timeout");
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("writes request");
+
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut stream, &mut raw).expect("reads response");
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        (status, body.to_string())
+    }
+
+    fn set_visibility(&self, folder: &str, visibility: &str) {
+        let path = self.workspace.join(folder).join("app.json");
+        let raw = std::fs::read_to_string(&path).expect("manifest exists");
+        let mut manifest: serde_json::Value = serde_json::from_str(&raw).expect("parses");
+        manifest["visibility"] = serde_json::json!(visibility);
+        std::fs::write(&path, manifest.to_string()).expect("writes manifest");
+    }
+
     fn add_app(&self, folder: &str, html: &str) {
         let dir = self.workspace.join(folder);
         std::fs::create_dir_all(&dir).expect("creates app folder");
@@ -338,4 +380,86 @@ fn every_spelling_of_an_app_root_serves_it() {
         assert_eq!(status, 200, "{path} should serve");
         assert_eq!(body, "<h1>trip</h1>", "{path} should serve the entry point");
     }
+}
+
+// ---- the gate, over a real socket ----
+
+#[test]
+fn a_private_app_is_refused_to_anyone_but_the_owner() {
+    let daemon = Daemon::start();
+    daemon.add_app("Diary", "<h1>secret</h1>");
+    daemon.wait_for("the app", |apps| !slugs(apps).is_empty());
+
+    // The owner's own browser: always allowed, no pairing with itself.
+    let (status, body) = daemon.get("/diary/");
+    assert_eq!(status, 200);
+    assert_eq!(body, "<h1>secret</h1>");
+
+    // Anyone else on the network: refused, and the content never appears.
+    let (status, body) = daemon.get_as_stranger("/diary/");
+    if status != 0 {
+        assert_eq!(
+            status, 403,
+            "a private app must not be served to the network"
+        );
+        assert!(!body.contains("secret"), "private content leaked");
+    }
+}
+
+#[test]
+fn a_household_app_opens_for_the_network() {
+    let daemon = Daemon::start();
+    daemon.add_app("Chores", "<h1>bins</h1>");
+    daemon.wait_for("the app", |apps| !slugs(apps).is_empty());
+
+    daemon.set_visibility("Chores", "network");
+    daemon.wait_for("the level to change", |apps| {
+        apps[0]["visibility"] == "network"
+    });
+
+    let (status, body) = daemon.get_as_stranger("/chores/");
+    if status != 0 {
+        assert_eq!(
+            status, 200,
+            "a household app should open on the home network"
+        );
+        assert_eq!(body, "<h1>bins</h1>");
+    }
+}
+
+#[test]
+fn an_invited_app_shows_the_wait_page_rather_than_refusing() {
+    let daemon = Daemon::start();
+    daemon.add_app("Trip", "<h1>portugal</h1>");
+    daemon.wait_for("the app", |apps| !slugs(apps).is_empty());
+
+    daemon.set_visibility("Trip", "invited");
+    daemon.wait_for("the level to change", |apps| {
+        apps[0]["visibility"] == "invited"
+    });
+
+    let (status, body) = daemon.get_as_stranger("/trip/");
+    if status != 0 {
+        assert_eq!(
+            status, 200,
+            "an unknown device waits, it is not turned away"
+        );
+        assert!(body.contains("Waiting for"), "should be the wait page");
+        assert!(
+            !body.contains("portugal"),
+            "the app must not leak while waiting"
+        );
+    }
+}
+
+#[test]
+fn a_nonsense_invite_link_gets_an_explanation_not_a_stack_trace() {
+    let daemon = Daemon::start();
+
+    let (status, body) = daemon.get("/i/not-a-real-token");
+    assert_eq!(status, 403);
+    assert!(
+        body.contains("will not open"),
+        "should explain, not just refuse"
+    );
 }

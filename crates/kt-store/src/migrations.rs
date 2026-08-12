@@ -25,6 +25,46 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE UNIQUE INDEX apps_path_idx ON apps(path);
     "#,
+    // 2: devices, invites, and the access log that makes sharing legible.
+    r#"
+    CREATE TABLE devices (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        user_agent  TEXT NOT NULL DEFAULT '',
+        fingerprint TEXT NOT NULL DEFAULT '',
+        first_seen  INTEGER NOT NULL,
+        last_seen   INTEGER NOT NULL
+    );
+
+    CREATE TABLE invites (
+        token          TEXT PRIMARY KEY,
+        app_slug       TEXT NOT NULL,
+        label          TEXT NOT NULL DEFAULT '',
+        expires_at     INTEGER,
+        pin_to_first   INTEGER NOT NULL DEFAULT 1,
+        auto_approve   INTEGER NOT NULL DEFAULT 0,
+        pinned_device  TEXT REFERENCES devices(id),
+        redemptions    INTEGER NOT NULL DEFAULT 0,
+        created_at     INTEGER NOT NULL,
+        revoked_at     INTEGER
+    );
+    CREATE INDEX invites_app_idx ON invites(app_slug);
+
+    -- Append-only. Every open, pairing decision and deploy, so the owner can
+    -- always answer "who has seen this".
+    CREATE TABLE access_log (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        at        INTEGER NOT NULL,
+        app_slug  TEXT,
+        device_id TEXT,
+        actor     TEXT NOT NULL,
+        action    TEXT NOT NULL,
+        detail    TEXT
+    );
+    CREATE INDEX access_log_at_idx ON access_log(at DESC);
+    CREATE INDEX access_log_app_idx ON access_log(app_slug, at DESC);
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a
@@ -62,13 +102,30 @@ mod tests {
 
     #[test]
     fn an_old_database_catches_up_without_rerunning_what_it_has() {
+        // Build a database that genuinely stopped partway: run only the first
+        // migration by hand, then let `apply` finish the job. Rerunning an
+        // already-applied CREATE TABLE fails, so reaching LATEST proves the
+        // skip works rather than the statements happening to be idempotent.
         let conn = Connection::open_in_memory().expect("opens");
-        apply(&conn).expect("applies");
-        // Rerunning migration 1 would fail on CREATE TABLE; reaching LATEST
-        // proves the skip works rather than the statements being idempotent.
-        conn.execute_batch("PRAGMA user_version = 1;")
-            .expect("sets");
+        let first = MIGRATIONS[0];
+        conn.execute_batch(&format!("BEGIN; {first} PRAGMA user_version = 1; COMMIT;"))
+            .expect("applies the first migration by hand");
+        assert_eq!(current_version(&conn).expect("reads"), 1);
+
         apply(&conn).expect("catches up");
         assert_eq!(current_version(&conn).expect("reads"), LATEST);
+    }
+
+    #[test]
+    fn a_fresh_database_gets_every_migration() {
+        // The upgrade path new users take, and the one that must never break.
+        let conn = Connection::open_in_memory().expect("opens");
+        apply(&conn).expect("applies");
+        assert_eq!(current_version(&conn).expect("reads"), LATEST);
+        assert_eq!(
+            current_version(&conn).expect("reads") as usize,
+            MIGRATIONS.len(),
+            "every migration should have run"
+        );
     }
 }
