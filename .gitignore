@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.pnpm-store/
+
+# Tauri
+shell/src-tauri/target/
+shell/src-tauri/gen/
+
+# Generated types are committed; CI fails if stale. Do not ignore:
+# shell/ui/src/generated/
+
+# macOS
+.DS_Store
+
+# Local runtime state
+*.db
+*.db-journal
+*.sock

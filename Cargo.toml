@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kitchen-table/kitchentable"
+rust-version = "1.85"
+
+# Shared dependency versions. Per CLAUDE.md rule 6, adding a crate to
+# kt-auth, kt-certs, or kt-tunnel-proto needs a justification in the PR.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

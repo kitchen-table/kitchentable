@@ -1,0 +1,10 @@
+[package]
+name = "kt-registry"
+description = "Workspace watcher, app.json parsing, app lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

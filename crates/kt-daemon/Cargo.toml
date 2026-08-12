@@ -1,0 +1,10 @@
+[package]
+name = "kt-daemon"
+description = "Kitchen Table daemon: wiring, event bus, supervision entrypoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
