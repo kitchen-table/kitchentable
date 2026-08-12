@@ -8,3 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kt-types = { version = "0.1.0", path = "../kt-types" }
+notify = "8.2.0"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true

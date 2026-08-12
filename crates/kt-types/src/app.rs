@@ -50,7 +50,7 @@ impl Visibility {
 ///
 /// Not exported to TypeScript. This is the daemon's view of a file on disk;
 /// clients read [`App`], which carries the derived fields they actually need.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppManifest {
     pub name: String,
     pub slug: String,
@@ -71,6 +71,37 @@ pub struct AppManifest {
 
 fn default_entry() -> String {
     "index.html".to_string()
+}
+
+/// An app as the daemon holds it: the manifest, plus where it lives.
+///
+/// The persistent half. URLs are deliberately absent because they depend on the
+/// port and hostname the daemon happens to have this run, so they are derived
+/// into [`App`] at the edge of the socket rather than stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppRecord {
+    pub manifest: AppManifest,
+    /// Absolute path to the app folder.
+    pub path: String,
+}
+
+impl AppRecord {
+    /// Derive the client-facing view. `origin` is the daemon's HTTP origin for
+    /// this run, e.g. `http://localhost:8420`.
+    pub fn to_app(&self, origin: &str, fallback_origin: &str) -> App {
+        let m = &self.manifest;
+        App {
+            slug: m.slug.clone(),
+            name: m.name.clone(),
+            icon: m.icon.clone(),
+            entry: m.entry.clone(),
+            visibility: m.visibility,
+            version: m.version,
+            url: format!("{origin}/{}", m.slug),
+            fallback_url: format!("{fallback_origin}/{}", m.slug),
+            path: self.path.clone(),
+        }
+    }
 }
 
 /// An app as clients see it: the manifest plus what the daemon knows about

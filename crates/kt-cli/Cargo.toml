@@ -7,4 +7,13 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# The command people type is `kt`; the crate is kt-cli so it sorts with its
+# siblings. `kitchentable` is offered as an alias by the installer.
+[[bin]]
+name = "kt"
+path = "src/main.rs"
+
 [dependencies]
+kt-types = { version = "0.1.0", path = "../kt-types" }
+serde_json.workspace = true
+thiserror.workspace = true
