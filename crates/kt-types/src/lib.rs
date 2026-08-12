@@ -22,10 +22,11 @@
 
 pub mod app;
 pub mod event;
+pub mod paths;
 pub mod protocol;
 pub mod status;
 
-pub use app::{App, AppManifest, Visibility};
+pub use app::{App, AppManifest, AppRecord, Visibility};
 pub use event::Event;
 pub use protocol::{ErrorCode, KtError, Request, Response, PROTOCOL_VERSION};
-pub use status::{ServingState, SysStatus};
+pub use status::{DegradedReason, ServingState, SysStatus};

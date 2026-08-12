@@ -8,3 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kt-types = { version = "0.1.0", path = "../kt-types" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
