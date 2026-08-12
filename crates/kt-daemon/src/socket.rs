@@ -151,6 +151,7 @@ mod tests {
     fn context() -> Arc<Context> {
         Arc::new(Context {
             library: Arc::new(crate::library::Library::new()),
+            store: Arc::new(kt_store::Store::in_memory().expect("opens")),
             workspace: "/tmp/ws".into(),
             urls: kt_types::Urls {
                 scheme: "http".into(),

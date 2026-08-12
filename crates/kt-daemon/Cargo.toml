@@ -23,4 +23,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+kt-auth = { path = "../kt-auth" }
 kt-mdns = { path = "../kt-mdns" }

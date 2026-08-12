@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Disconnected } from "./Disconnected";
 import { Library } from "./Library";
+import { Sharing } from "./Sharing";
 import { StatusBar } from "./StatusBar";
 import { useApps, useHealth, useStatus } from "./daemon";
 
@@ -27,6 +29,11 @@ function Window() {
 
   const apps = useApps(ready);
   const status = useStatus(ready);
+  const [sharing, setSharing] = useState<string | null>(null);
+
+  // Resolve from the live list rather than holding a copy, so the panel keeps
+  // showing the current visibility after a change.
+  const shared = (apps.data ?? []).find((a) => a.slug === sharing);
 
   if (health.isLoading) {
     return <Centred>Starting…</Centred>;
@@ -39,10 +46,15 @@ function Window() {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <main style={{ flex: 1, minHeight: 0 }}>
-        <Library
-          apps={apps.data ?? []}
-          workspace={status.data?.workspace ?? "…"}
-        />
+        {shared ? (
+          <Sharing app={shared} onClose={() => setSharing(null)} />
+        ) : (
+          <Library
+            apps={apps.data ?? []}
+            workspace={status.data?.workspace ?? "…"}
+            onShare={(app) => setSharing(app.slug)}
+          />
+        )}
       </main>
       <StatusBar status={status.data} />
     </div>

@@ -155,6 +155,7 @@ async fn run() -> Result<(), StartupError> {
 
     let ctx = Arc::new(rpc::Context {
         library: Arc::clone(&library),
+        store: Arc::clone(&store),
         workspace: workspace.display().to_string(),
         urls: urls.clone(),
         serving,
