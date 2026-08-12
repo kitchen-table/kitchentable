@@ -21,3 +21,6 @@ shell/src-tauri/gen/
 *.db
 *.db-journal
 *.sock
+
+# ts-rs intermediate output; the committed copy is shell/ui/src/generated
+crates/kt-types/bindings/
