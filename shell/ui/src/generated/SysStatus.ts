@@ -11,6 +11,8 @@ protocol_version: number, daemon_version: string,
  */
 workspace: string, serving: ServingState, app_count: number, 
 /**
- * Seconds since the daemon started.
+ * Seconds since the daemon started. `u32` rather than `u64` because
+ * ts-rs maps 64-bit integers to `bigint`, which JSON cannot carry - and
+ * 136 years of uptime is enough.
  */
-uptime_secs: bigint, };
+uptime_secs: number, };

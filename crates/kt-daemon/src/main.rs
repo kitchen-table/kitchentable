@@ -22,7 +22,26 @@ use library::Library;
 /// Ports we try, in order. Port 80 first so `http://hostname.local/app` works
 /// with no port in the URL; a high port when something else already has it,
 /// which on a developer's machine is most of the time.
-const PORTS: &[u16] = &[80, 8420, 8421, 8422];
+const DEFAULT_PORTS: &[u16] = &[80, 8420, 8421, 8422];
+
+/// Ports to try this run. `KT_PORTS` overrides, comma-separated, so a test can
+/// pin a port instead of racing whatever else is on the machine.
+fn ports() -> Vec<u16> {
+    match std::env::var("KT_PORTS") {
+        Ok(raw) => {
+            let parsed: Vec<u16> = raw
+                .split(',')
+                .filter_map(|p| p.trim().parse().ok())
+                .collect();
+            if parsed.is_empty() {
+                DEFAULT_PORTS.to_vec()
+            } else {
+                parsed
+            }
+        }
+        Err(_) => DEFAULT_PORTS.to_vec(),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 enum StartupError {
@@ -35,7 +54,7 @@ enum StartupError {
     #[error(transparent)]
     Socket(#[from] socket::SocketError),
     #[error("no port available; tried {0:?}")]
-    NoPort(&'static [u16]),
+    NoPort(Vec<u16>),
 }
 
 #[tokio::main]
@@ -76,7 +95,13 @@ async fn run() -> Result<(), StartupError> {
 
     // Announce every app on the network before anything else can ask for a
     // URL, so app.list never reports a hostname that is not yet on the air.
-    let announcer = kt_mdns::for_this_platform();
+    // Tests set KT_NO_MDNS so a CI run does not publish hostnames onto
+    // whatever network it happens to be on.
+    let announcer: Box<dyn kt_mdns::Announcer> = if std::env::var_os("KT_NO_MDNS").is_some() {
+        Box::new(kt_mdns::UnsupportedAnnouncer)
+    } else {
+        kt_mdns::for_this_platform()
+    };
     let addr = kt_mdns::primary_ipv4();
     if addr.is_none() {
         tracing::warn!("no network address found; apps are reachable on this machine only");
@@ -135,7 +160,11 @@ async fn run() -> Result<(), StartupError> {
         let registry = Registry::new(&workspace);
         let store = Arc::clone(&store);
         let library = Arc::clone(&library);
-        let announcer = Arc::from(kt_mdns::for_this_platform());
+        let announcer: Arc<dyn kt_mdns::Announcer> = if std::env::var_os("KT_NO_MDNS").is_some() {
+            Arc::new(kt_mdns::UnsupportedAnnouncer)
+        } else {
+            Arc::from(kt_mdns::for_this_platform())
+        };
         Registry::new(&workspace)
             .watch(move || announce_all(&registry, &store, &library, &*announcer, addr))?
     };
@@ -232,7 +261,8 @@ fn origin_for(host: &str, port: u16) -> String {
 /// degraded if we did not get the one we wanted.
 async fn bind_http() -> Result<(tokio::net::TcpListener, u16, Option<DegradedReason>), StartupError>
 {
-    for (i, port) in PORTS.iter().enumerate() {
+    let candidates = ports();
+    for (i, port) in candidates.iter().enumerate() {
         match tokio::net::TcpListener::bind(("0.0.0.0", *port)).await {
             Ok(listener) => {
                 let degraded = (i > 0).then_some(DegradedReason::PortFallback);
@@ -244,7 +274,7 @@ async fn bind_http() -> Result<(tokio::net::TcpListener, u16, Option<DegradedRea
             Err(e) => tracing::debug!(port, error = %e, "port unavailable"),
         }
     }
-    Err(StartupError::NoPort(PORTS))
+    Err(StartupError::NoPort(candidates))
 }
 
 #[cfg(test)]

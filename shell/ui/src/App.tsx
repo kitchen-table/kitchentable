@@ -1,46 +1,67 @@
-import { Mark } from "./Mark";
-import { StatusPill } from "./StatusPill";
-import type { ServingState } from "./generated";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Disconnected } from "./Disconnected";
+import { Library } from "./Library";
+import { StatusBar } from "./StatusBar";
+import { useApps, useHealth, useStatus } from "./daemon";
+
+const client = new QueryClient();
+
+export function App() {
+  return (
+    <QueryClientProvider client={client}>
+      <Window />
+    </QueryClientProvider>
+  );
+}
 
 /**
- * Scaffold shell (checklist D0).
+ * The window has exactly two shapes: connected to a daemon, or not.
  *
- * Everything visible in this app is rendered from daemon socket state. The
- * socket does not exist yet, so `serving` is undefined and the app shows the
- * disconnected state - which is a real state worth designing, not a
- * placeholder. D3 replaces the prop with a live subscription.
+ * "Not" is a real, designed state rather than a spinner, because it is what
+ * someone sees if the daemon crashes or the app was just updated - and it is
+ * the only screen that can explain what to do about it.
  */
-export function App({ serving }: { serving?: ServingState }) {
+function Window() {
+  const health = useHealth();
+  const ready = health.data?.state === "ready";
+
+  const apps = useApps(ready);
+  const status = useStatus(ready);
+
+  if (health.isLoading) {
+    return <Centred>Starting…</Centred>;
+  }
+
+  if (!ready) {
+    return <Disconnected health={health.data} onRetry={() => health.refetch()} />;
+  }
+
   return (
-    <main
+    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <main style={{ flex: 1, minHeight: 0 }}>
+        <Library
+          apps={apps.data ?? []}
+          workspace={status.data?.workspace ?? "…"}
+        />
+      </main>
+      <StatusBar status={status.data} />
+    </div>
+  );
+}
+
+function Centred({ children }: { children: React.ReactNode }) {
+  return (
+    <div
       style={{
         height: "100%",
         display: "flex",
-        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 18,
-        padding: 40,
-        textAlign: "center",
+        font: "400 14px var(--font-sans)",
+        color: "var(--ink3)",
       }}
     >
-      <Mark size={44} />
-      <h1 style={{ margin: 0, font: "800 26px/1.1 var(--font-sans)", letterSpacing: "-0.02em" }}>
-        Kitchen Table
-      </h1>
-      <p
-        style={{
-          margin: 0,
-          maxWidth: 340,
-          font: "400 14px/1.6 var(--font-sans)",
-          color: "var(--ink3)",
-        }}
-      >
-        {serving
-          ? "Your workspace and everything you are serving appears here."
-          : "Waiting for the daemon. Once it is up, your workspace and everything you are serving appears here."}
-      </p>
-      <StatusPill serving={serving} />
-    </main>
+      {children}
+    </div>
   );
 }
