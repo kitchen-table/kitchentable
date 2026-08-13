@@ -16,6 +16,7 @@ use kt_types::{paths, AppRecord, DegradedReason, Event, ServingState, Urls};
 mod authoring;
 mod keys;
 mod library;
+mod relay;
 mod rpc;
 mod socket;
 mod trust;
@@ -113,6 +114,23 @@ async fn run() -> Result<(), StartupError> {
     // The public half only. It is what the owner links to an account and what
     // support asks for; the private half stays inside the identity.
     let install_key = keys.install.as_ref().map(|i| i.public().to_string());
+
+    // Dial the relay, if this install has one and knows who it is.
+    //
+    // Spawned and never awaited: serving on the local network must not wait on
+    // a network dial, and must not stop because one failed. A daemon with no
+    // relay is not a degraded daemon - it is the free tier.
+    match (relay::Config::from_env(), keys.install.clone()) {
+        (Some(config), Some(identity)) => {
+            tracing::info!(url = config.url, "relay configured; dialling");
+            tokio::spawn(relay::run(config, identity));
+        }
+        (Some(_), None) => tracing::warn!(
+            "a relay is configured but this install has no identity, so there \
+             is nothing to dial with; see the keystore warnings above"
+        ),
+        (None, _) => {}
+    }
     let trust = Arc::new(trust::Trust::new(
         Arc::clone(&store),
         keys.session,

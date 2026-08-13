@@ -275,6 +275,29 @@ impl ClientHello {
     }
 }
 
+/// The edge's answer to a hello. The third and last message of the handshake.
+///
+/// An explicit answer rather than silence-means-yes, which is what this was
+/// first written as. Silence costs one round trip less and is wrong for a
+/// reason worth recording: the daemon would carry on believing it was connected
+/// while the edge had already refused it, and - because a connection that got
+/// that far counts as a success - it would reset its reconnect backoff and dial
+/// again immediately, every time, for as long as the refusal lasted. The
+/// tightest possible loop, produced by the one mechanism meant to prevent it.
+///
+/// A connection lasts hours. One round trip to know whether it exists is not a
+/// cost worth arguing about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "hello", rename_all = "snake_case")]
+pub enum HelloResponse {
+    /// In. This is the last thing said before real traffic.
+    Welcome { version: u16 },
+    /// Not in, and why. Sent as a frame rather than in a websocket close
+    /// frame, whose reason field caps at 123 bytes and would silently truncate
+    /// anything with a detail string on it.
+    Refused { reason: crate::CloseReason },
+}
+
 /// What the edge learned from a hello it accepted.
 ///
 /// Deliberately small. Whether this install is linked to an account, still
