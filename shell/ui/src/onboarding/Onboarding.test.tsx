@@ -10,6 +10,7 @@ function status(over: Partial<SysStatus> = {}): SysStatus {
     workspace: "/Users/ada/KitchenTable",
     serving: { state: "serving" },
     app_count: 1,
+    install_key: null,
     uptime_secs: 10,
     ...over,
   };
