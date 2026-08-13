@@ -25,4 +25,13 @@ fallback_url: string,
 /**
  * Absolute path to the app folder in the workspace.
  */
-path: string, };
+path: string, 
+/**
+ * Bundle size in bytes, for the Overview tab. Saturates at `u32::MAX`.
+ */
+size_bytes: number, 
+/**
+ * Unix seconds when the content last changed. Absent when the filesystem
+ * does not report it.
+ */
+deployed_at?: number, };

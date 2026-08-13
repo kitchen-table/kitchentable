@@ -128,15 +128,22 @@ impl Registry {
             }
         };
 
+        let (size_bytes, deployed_at) = measure(folder);
+
         Ok(AppRecord {
             manifest,
             path: folder.display().to_string(),
+            size_bytes,
+            deployed_at,
         })
     }
 
     /// Write a default manifest next to the content, so the app is
     /// self-describing and portable: copy the folder elsewhere and it is still
     /// the same app.
+    ///
+    /// (See [`measure`] below for how the Overview tab's size and deploy time
+    /// are derived.)
     fn generate(
         &self,
         folder_name: &str,
@@ -263,6 +270,61 @@ fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with('.'))
+}
+
+/// Total bytes and last-modified time for an app folder.
+///
+/// Both are for the Overview tab: "12.4 MB bundle" and "deployed 2 hours ago".
+/// Until deploys exist (checklist D6) the newest mtime in the tree is the
+/// honest answer to "when did this last change", and it is what someone dragging
+/// files into a folder would expect the app to notice.
+///
+/// Walks iteratively rather than recursively so a symlink loop or a
+/// pathologically deep tree cannot blow the stack, skips hidden entries to
+/// match what the server will serve, and does not follow symlinks out of the
+/// folder - a link to `/` would otherwise measure the whole disk.
+fn measure(folder: &Path) -> (u64, Option<u64>) {
+    let mut bytes = 0u64;
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![folder.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_hidden(&path) {
+                continue;
+            }
+            // `symlink_metadata` does not traverse, so a link is measured as
+            // the link rather than as whatever it points at.
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                bytes = bytes.saturating_add(meta.len());
+            }
+
+            if let Ok(modified) = meta.modified() {
+                if newest.is_none_or(|current| modified > current) {
+                    newest = Some(modified);
+                }
+            }
+        }
+    }
+
+    let seconds = newest.and_then(|t| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    });
+
+    (bytes, seconds)
 }
 
 /// Ignore noise the editor makes: dotfiles, swap files, and macOS metadata.

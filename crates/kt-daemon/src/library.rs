@@ -184,8 +184,8 @@ mod tests {
     use kt_types::{AppManifest, Visibility};
 
     fn record(slug: &str, name: &str, path: &str) -> AppRecord {
-        AppRecord {
-            manifest: AppManifest {
+        AppRecord::unmeasured(
+            AppManifest {
                 name: name.into(),
                 slug: slug.into(),
                 icon: None,
@@ -194,8 +194,8 @@ mod tests {
                 version: 1,
                 extra: serde_json::Map::new(),
             },
-            path: path.into(),
-        }
+            path.into(),
+        )
     }
 
     #[test]

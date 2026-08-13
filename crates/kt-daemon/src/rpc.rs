@@ -359,8 +359,8 @@ mod tests {
     fn context() -> Context {
         let library = Arc::new(Library::new());
         let dir = std::env::temp_dir().display().to_string();
-        library.replace(vec![AppRecord {
-            manifest: AppManifest {
+        library.replace(vec![AppRecord::unmeasured(
+            AppManifest {
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
                 icon: None,
@@ -369,8 +369,8 @@ mod tests {
                 version: 3,
                 extra: serde_json::Map::new(),
             },
-            path: dir.clone(),
-        }]);
+            dir.clone(),
+        )]);
 
         Context {
             library,

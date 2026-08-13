@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { App, SysStatus, Visibility } from "../generated";
 import { Library } from "../Library";
 import { StatusBar } from "../StatusBar";
+import { AppDetail } from "../surfaces/AppDetail";
 import { quit } from "../daemon";
 import { LIBRARY, type Surface } from "../navigation";
 import { useAppearance } from "../theme";
@@ -96,18 +97,36 @@ function Content({
   onNavigate: (surface: Surface) => void;
   onNewApp: () => void;
 }) {
+  const library = (filter: Visibility | null) => (
+    <Library
+      apps={apps}
+      filter={filter}
+      query={query}
+      workspace={status?.workspace ?? "…"}
+      onOpen={(app) => onNavigate({ kind: "app", slug: app.slug, tab: "overview" })}
+      onNewApp={onNewApp}
+    />
+  );
+
   switch (surface.kind) {
     case "library":
+      return library(surface.filter);
+
+    case "app": {
+      const app = apps.find((candidate) => candidate.slug === surface.slug);
+      // The folder was deleted while its detail view was open. Dropping back to
+      // the library beats an error page about an app that no longer exists.
+      if (!app) return library(null);
       return (
-        <Library
-          apps={apps}
-          filter={surface.filter}
-          query={query}
-          workspace={status?.workspace ?? "…"}
-          onOpen={(app) => onNavigate({ kind: "app", slug: app.slug, tab: "overview" })}
-          onNewApp={onNewApp}
+        <AppDetail
+          app={app}
+          tab={surface.tab}
+          onTab={(tab) => onNavigate({ ...surface, tab })}
+          onNavigate={onNavigate}
         />
       );
+    }
+
     default:
       // Filled in as each surface lands; the rail is already routing to them.
       return <NotBuiltYet surface={surface} />;
