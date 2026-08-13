@@ -17,7 +17,7 @@ pub mod device;
 pub mod invite;
 pub mod session;
 
-pub use device::{Device, DeviceId, DeviceStatus};
+pub use device::{Device, DeviceId, DeviceStatus, NamedBy};
 pub use invite::{Invite, InviteError, InvitePolicy, InviteToken};
 pub use session::{SessionError, SessionKeys, SessionToken};
 
