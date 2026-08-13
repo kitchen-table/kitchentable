@@ -38,3 +38,24 @@ describe("daemon events", () => {
     expect(stale({ event: "error", message: "the keychain is locked" })).toEqual([]);
   });
 });
+
+describe("subscribing without a Tauri IPC", () => {
+  it("mounts and unmounts without throwing", async () => {
+    // The same UI runs in a plain browser via `pnpm -C shell/ui dev`, and
+    // under vitest. Neither has an IPC for `listen` to attach to, and a window
+    // that throws on mount is worse than one without live updates - the polls
+    // still carry it.
+    const { renderHook } = await import("@testing-library/react");
+    const { QueryClientProvider } = await import("@tanstack/react-query");
+    const { useDaemonEvents } = await import("./events");
+    const React = await import("react");
+
+    const client = new QueryClient();
+    const { unmount } = renderHook(() => useDaemonEvents(), {
+      wrapper: ({ children }) =>
+        React.createElement(QueryClientProvider, { client }, children),
+    });
+
+    expect(() => unmount()).not.toThrow();
+  });
+});

@@ -61,19 +61,44 @@ export function invalidate(client: QueryClient, event: Event): void {
  *
  * Mounted once, at the top of the tree. Listening per-surface would mean an
  * event arriving while a surface is closed is simply missed.
+ *
+ * Survives having no Tauri IPC to listen on. The same UI runs in a plain
+ * browser - `pnpm -C shell/ui dev`, which CLAUDE.md documents - and under
+ * vitest, and in neither is there an IPC for `listen` to attach to. Without
+ * live updates the window still works: every query has a fallback poll, which
+ * is exactly what it had before events existed. Throwing on mount instead
+ * would take the whole window down for the sake of an improvement.
  */
 export function useDaemonEvents(): void {
   const client = useQueryClient();
 
   useEffect(() => {
-    const listeners = [
-      listen<Event>(EVENT, ({ payload }) => invalidate(client, payload)),
-      listen(RESYNC, () => void client.invalidateQueries()),
-    ];
+    let stops: Array<() => void> = [];
+    let gone = false;
+
+    // `listen` reaches for the IPC synchronously, so this needs both a
+    // try/catch and a rejection handler.
+    try {
+      void Promise.all([
+        listen<Event>(EVENT, ({ payload }) => invalidate(client, payload)),
+        listen(RESYNC, () => void client.invalidateQueries()),
+      ])
+        .then((listeners) => {
+          // Unmounted before the listeners attached: stop them immediately
+          // rather than leaking a subscription onto a dead component.
+          if (gone) listeners.forEach((stop) => stop());
+          else stops = listeners;
+        })
+        .catch(() => {
+          // No IPC. The polls carry it.
+        });
+    } catch {
+      // Same.
+    }
+
     return () => {
-      for (const listener of listeners) {
-        void listener.then((stop) => stop());
-      }
+      gone = true;
+      stops.forEach((stop) => stop());
     };
   }, [client]);
 }
