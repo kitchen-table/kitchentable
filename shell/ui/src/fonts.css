@@ -1,0 +1,24 @@
+/*
+ * The two faces the mockups are drawn in, bundled rather than fetched.
+ *
+ * The mockups load these from the Google Fonts CDN. A product whose pitch is
+ * that nothing leaves your desk must not phone a CDN on every launch, so the
+ * woff2 files ship inside the app and vite fingerprints them like any asset.
+ *
+ * Latin subsets only, and only the weights the design actually uses:
+ * Schibsted Grotesk 400/500/600/700/800, JetBrains Mono 400/500/700. Adding a
+ * weight here means adding it to the design first.
+ *
+ * Both faces are SIL Open Font License 1.1; see the LICENSE files in each
+ * package under node_modules/@fontsource/.
+ */
+
+@import "@fontsource/schibsted-grotesk/latin-400.css";
+@import "@fontsource/schibsted-grotesk/latin-500.css";
+@import "@fontsource/schibsted-grotesk/latin-600.css";
+@import "@fontsource/schibsted-grotesk/latin-700.css";
+@import "@fontsource/schibsted-grotesk/latin-800.css";
+
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-500.css";
+@import "@fontsource/jetbrains-mono/latin-700.css";

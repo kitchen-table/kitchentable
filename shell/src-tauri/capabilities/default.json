@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window may ask the Rust side to do. Deliberately short: the shell is a proxy, and everything the product does goes over the daemon socket instead.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    {
+      "identifier": "dialog:allow-open",
+      "comment": "The folder picker behind 'Add an app'. Open only - the shell never saves, asks or confirms through a native dialog."
+    }
+  ]
+}

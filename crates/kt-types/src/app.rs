@@ -83,9 +83,39 @@ pub struct AppRecord {
     pub manifest: AppManifest,
     /// Absolute path to the app folder.
     pub path: String,
+    /// Total size of the folder's contents, in bytes.
+    pub size_bytes: u64,
+    /// When the content last changed, in unix seconds. `None` when the
+    /// filesystem will not say - some network mounts, and Linux before 4.11.
+    pub deployed_at: Option<u64>,
+    /// Whether the manifest's `entry` actually exists in the folder.
+    ///
+    /// False means every request to the app's root is a 404. The app is
+    /// otherwise entirely healthy - registered, announced, gated - which is
+    /// exactly why it has to be said out loud rather than left to be discovered
+    /// by tapping the link on a phone.
+    pub entry_exists: bool,
 }
 
 impl AppRecord {
+    /// A record whose folder has not been walked.
+    ///
+    /// `size_bytes` and `deployed_at` are measured from disk, which only the
+    /// registry does. Everything else that builds a record - the store reading
+    /// a row, tests - goes through here, so a zero size is visibly a
+    /// "not measured" rather than a claim that the folder is empty.
+    pub fn unmeasured(manifest: AppManifest, path: String) -> Self {
+        Self {
+            manifest,
+            path,
+            size_bytes: 0,
+            deployed_at: None,
+            // Assumed present. Claiming a missing entry without having looked
+            // would put a "will not open" warning on a working app.
+            entry_exists: true,
+        }
+    }
+
     /// Derive the client-facing view.
     ///
     /// `hostname` is the name actually announced on the network, which may be
@@ -110,6 +140,13 @@ impl AppRecord {
             hostname: urls.hostname.clone(),
             fallback_url: format!("{}/{}", urls.fallback_origin, m.slug),
             path: self.path.clone(),
+            // Saturating rather than wrapping: ts-rs maps u64 to bigint, which
+            // JSON cannot carry, so these cross the wire as u32. An app folder
+            // over 4 GB reports 4 GB, which is the right kind of wrong for a
+            // number whose only job is to render as "12.4 MB".
+            size_bytes: self.size_bytes.min(u32::MAX as u64) as u32,
+            deployed_at: self.deployed_at.map(|t| t.min(u32::MAX as u64) as u32),
+            entry_exists: self.entry_exists,
         }
     }
 }
@@ -156,6 +193,16 @@ pub struct App {
     pub fallback_url: String,
     /// Absolute path to the app folder in the workspace.
     pub path: String,
+    /// Bundle size in bytes, for the Overview tab. Saturates at `u32::MAX`.
+    pub size_bytes: u32,
+    /// Unix seconds when the content last changed. Absent when the filesystem
+    /// does not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub deployed_at: Option<u32>,
+    /// Whether `entry` is actually in the folder. False means the app's root
+    /// URL is a 404 even though everything else about it is healthy.
+    pub entry_exists: bool,
 }
 
 #[cfg(test)]
@@ -184,6 +231,9 @@ mod tests {
                 extra: serde_json::Map::new(),
             },
             path: "/ws/trip".into(),
+            size_bytes: 42_000,
+            deployed_at: Some(1_760_000_000),
+            entry_exists: true,
         }
     }
 

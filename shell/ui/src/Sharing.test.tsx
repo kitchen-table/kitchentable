@@ -19,6 +19,9 @@ function app(over: Partial<App> = {}): App {
     url: "http://trip.local",
     fallback_url: "http://192.168.0.5/trip",
     path: "/ws/Trip",
+    size_bytes: 42_000,
+    deployed_at: 1_760_000_000,
+    entry_exists: true,
     ...over,
   };
 }
@@ -29,7 +32,7 @@ function renderSharing(over: Partial<App> = {}) {
   });
   return render(
     <QueryClientProvider client={client}>
-      <Sharing app={app(over)} onClose={() => {}} />
+      <Sharing app={app(over)} />
     </QueryClientProvider>,
   );
 }

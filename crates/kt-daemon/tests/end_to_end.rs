@@ -463,3 +463,317 @@ fn a_nonsense_invite_link_gets_an_explanation_not_a_stack_trace() {
         "should explain, not just refuse"
     );
 }
+
+// ---- authoring over the socket ------------------------------------------
+//
+// The window's "Add an app" runs through these. Every one of them is checked
+// against the real binary rather than the dispatcher, because the thing that
+// makes them work is a rescan happening before the reply is written - and a
+// unit test that calls the handler once cannot tell whether it did.
+
+#[test]
+fn app_create_makes_a_folder_and_answers_with_the_app() {
+    let daemon = Daemon::start();
+
+    let app = daemon.call(
+        "app.create",
+        Some(serde_json::json!({ "name": "Packing List" })),
+    );
+
+    assert_eq!(app["slug"], "packing-list");
+    assert_eq!(app["name"], "Packing List");
+    // Private, like every app that has never been shared.
+    assert_eq!(app["visibility"], "private");
+
+    // Answered from the library, not from a guess: it is listed already.
+    let apps = daemon.call("app.list", None);
+    assert!(slugs(&apps).contains(&"packing-list".to_string()));
+}
+
+#[test]
+fn a_created_app_is_served_immediately() {
+    // The reply arriving before the app is reachable would be a lie the user
+    // finds out about by tapping the link.
+    let daemon = Daemon::start();
+    daemon.call("app.create", Some(serde_json::json!({ "name": "Notes" })));
+
+    let (status, body) = daemon.get("/notes/");
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("<title>Notes</title>"),
+        "the starter page is there"
+    );
+}
+
+#[test]
+fn creating_two_apps_with_one_name_does_not_clobber_the_first() {
+    let daemon = Daemon::start();
+
+    let first = daemon.call("app.create", Some(serde_json::json!({ "name": "Notes" })));
+    let second = daemon.call("app.create", Some(serde_json::json!({ "name": "Notes" })));
+
+    assert_eq!(first["slug"], "notes");
+    assert_ne!(second["slug"], first["slug"], "the second got its own slug");
+
+    let apps = daemon.call("app.list", None);
+    assert_eq!(apps.as_array().expect("array").len(), 2);
+}
+
+#[test]
+fn a_name_that_would_escape_the_workspace_stays_inside_it() {
+    let daemon = Daemon::start();
+
+    let app = daemon.call(
+        "app.create",
+        Some(serde_json::json!({ "name": "../../../etc/evil" })),
+    );
+
+    let path = std::path::Path::new(app["path"].as_str().expect("path"));
+    let workspace = daemon
+        .workspace
+        .canonicalize()
+        .expect("workspace canonicalises");
+    assert!(
+        path.canonicalize()
+            .expect("app canonicalises")
+            .starts_with(&workspace),
+        "an app must never be created outside the workspace"
+    );
+}
+
+#[test]
+fn app_create_refuses_an_empty_name_rather_than_inventing_one() {
+    let daemon = Daemon::start();
+
+    // `try_call` hands back the error object as text.
+    let error = daemon
+        .try_call("app.create", Some(serde_json::json!({ "name": "   " })))
+        .expect_err("should be refused");
+    assert!(
+        error.contains("bad_request"),
+        "should be the caller's fault: {error}"
+    );
+    assert!(
+        error.contains("needs a name"),
+        "should say what is wrong: {error}"
+    );
+}
+
+#[test]
+fn app_import_copies_a_folder_in_and_leaves_the_original_alone() {
+    let daemon = Daemon::start();
+
+    // Somewhere outside the workspace, as a real drop from Finder would be.
+    let outside = std::env::temp_dir().join(format!("kt-import-{}", std::process::id()));
+    std::fs::create_dir_all(outside.join("Trip Planner/assets")).expect("creates");
+    std::fs::write(outside.join("Trip Planner/index.html"), "<h1>lisbon</h1>").expect("writes");
+    std::fs::write(outside.join("Trip Planner/assets/a.css"), "body{}").expect("writes");
+
+    let app = daemon.call(
+        "app.import",
+        Some(serde_json::json!({ "path": outside.join("Trip Planner").display().to_string() })),
+    );
+
+    assert_eq!(app["slug"], "trip-planner");
+
+    let (status, body) = daemon.get("/trip-planner/");
+    assert_eq!(status, 200);
+    assert!(body.contains("lisbon"), "the copied content is served");
+
+    assert!(
+        outside.join("Trip Planner/index.html").exists(),
+        "importing copies; it does not move someone's folder out from under them"
+    );
+
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn app_import_refuses_a_folder_already_in_the_workspace() {
+    // It is already an app. Copying it would quietly duplicate it.
+    let daemon = Daemon::start();
+    daemon.add_app("Chores", "<h1>bins</h1>");
+    daemon.wait_for("chores to appear", |apps| {
+        slugs(apps).contains(&"chores".to_string())
+    });
+
+    let error = daemon
+        .try_call(
+            "app.import",
+            Some(serde_json::json!({
+                "path": daemon.workspace.join("Chores").display().to_string()
+            })),
+        )
+        .expect_err("should be refused");
+
+    assert!(
+        error.contains("bad_request"),
+        "should be the caller's fault: {error}"
+    );
+    assert!(
+        error.contains("already in your workspace"),
+        "the message should say why: {error}"
+    );
+}
+
+// ---- approving a device -------------------------------------------------
+//
+// The flagship flow, and the one HANDOFF says to run by hand before believing
+// any auth change: mint a link, open it, open it again, approve, refresh.
+// These cover the approving half, which until now had no caller but a human
+// with a socket client.
+
+#[test]
+fn approving_a_waiting_device_lets_it_in_and_names_it() {
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+    daemon.wait_for("invited to stick", |apps| {
+        apps.as_array()
+            .is_some_and(|a| a.iter().any(|app| app["visibility"] == "invited"))
+    });
+
+    // A stranger opens it: refused politely, and remembered as pending.
+    let (status, body) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return; // no network on this runner
+    }
+    assert!(body.contains("Waiting for"), "should be the wait page");
+
+    let devices = daemon.call("device.list", None);
+    let waiting: Vec<_> = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|d| d["status"] == "pending")
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        1,
+        "the stranger should be waiting: {devices}"
+    );
+    let id = waiting[0]["id"].as_str().expect("id").to_string();
+
+    // The owner approves, naming the device in the same call.
+    let approved = daemon.call(
+        "device.approve",
+        Some(serde_json::json!({ "id": id, "name": "Kitchen iPad" })),
+    );
+    assert_eq!(approved["status"], "approved");
+
+    let devices = daemon.call("device.list", None);
+    let device = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["id"] == id.as_str())
+        .expect("still listed");
+    assert_eq!(device["name"], "Kitchen iPad", "approving also named it");
+    assert_eq!(device["status"], "approved");
+}
+
+#[test]
+fn a_device_decision_is_written_to_the_access_log() {
+    // Who gets in is exactly what the Activity view exists to show.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return;
+    }
+
+    let devices = daemon.call("device.list", None);
+    let Some(id) = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .map(|d| d["id"].as_str().expect("id").to_string())
+    else {
+        return;
+    };
+
+    daemon.call("device.deny", Some(serde_json::json!({ "id": id })));
+
+    let events = daemon.call("log.query", Some(serde_json::json!({ "limit": 20 })));
+    assert!(
+        events
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|e| e["action"] == "denied" && e["device_id"] == id.as_str()),
+        "the refusal should be in the log: {events}"
+    );
+}
+
+#[test]
+fn denying_and_revoking_are_told_apart_in_the_log() {
+    // They land on the same stored status, so the log is the only place the
+    // difference survives.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return;
+    }
+    let devices = daemon.call("device.list", None);
+    let Some(id) = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .map(|d| d["id"].as_str().expect("id").to_string())
+    else {
+        return;
+    };
+
+    daemon.call("device.approve", Some(serde_json::json!({ "id": id })));
+    daemon.call("device.revoke", Some(serde_json::json!({ "id": id })));
+
+    let events = daemon.call("log.query", Some(serde_json::json!({ "limit": 20 })));
+    let actions: Vec<&str> = events
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+
+    assert!(actions.contains(&"paired"), "approval logged: {actions:?}");
+    assert!(
+        actions.contains(&"revoked"),
+        "revocation logged: {actions:?}"
+    );
+    assert!(
+        !actions.contains(&"denied"),
+        "this was not a denial: {actions:?}"
+    );
+}
+
+#[test]
+fn approving_an_unknown_device_is_an_error_not_a_silent_success() {
+    let daemon = Daemon::start();
+
+    let error = daemon
+        .try_call(
+            "device.approve",
+            Some(serde_json::json!({ "id": "AAAAAAAAAAAAAAAAAAAAAA" })),
+        )
+        .expect_err("should be refused");
+    assert!(
+        error.contains("not_found") || error.contains("bad_request"),
+        "{error}"
+    );
+}

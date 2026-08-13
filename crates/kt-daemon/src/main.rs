@@ -13,6 +13,7 @@ use kt_server::AppSource;
 use kt_store::Store;
 use kt_types::{paths, DegradedReason, ServingState, Urls};
 
+mod authoring;
 mod library;
 mod rpc;
 mod socket;
@@ -153,18 +154,11 @@ async fn run() -> Result<(), StartupError> {
     let socket_path = paths::socket_path(&home);
     let socket_listener = socket::bind(&socket_path).await?;
 
-    let ctx = Arc::new(rpc::Context {
-        library: Arc::clone(&library),
-        store: Arc::clone(&store),
-        workspace: workspace.display().to_string(),
-        urls: urls.clone(),
-        serving,
-        started: Instant::now(),
-    });
-
-    // Rescan whenever the workspace settles. The watcher must outlive this
-    // scope or the watch stops, hence the binding.
-    let _watcher = {
+    // One rescan closure, shared by the watcher and the socket. `app.create`
+    // has to answer with the app it just made, and waiting out the watcher's
+    // debounce - tuned for someone finishing a folder copy - is far too long to
+    // block a socket call on.
+    let rescan: rpc::Rescan = {
         let registry = Registry::new(&workspace);
         let store = Arc::clone(&store);
         let library = Arc::clone(&library);
@@ -173,9 +167,22 @@ async fn run() -> Result<(), StartupError> {
         } else {
             Arc::from(kt_mdns::for_this_platform())
         };
-        Registry::new(&workspace)
-            .watch(move || announce_all(&registry, &store, &library, &*announcer, addr))?
+        Arc::new(move || announce_all(&registry, &store, &library, &*announcer, addr))
     };
+
+    let ctx = Arc::new(rpc::Context {
+        library: Arc::clone(&library),
+        store: Arc::clone(&store),
+        workspace: workspace.display().to_string(),
+        urls: urls.clone(),
+        serving,
+        started: Instant::now(),
+        rescan: Arc::clone(&rescan),
+    });
+
+    // Rescan whenever the workspace settles. The watcher must outlive this
+    // scope or the watch stops, hence the binding.
+    let _watcher = Registry::new(&workspace).watch(move || rescan())?;
 
     tracing::info!(
         workspace = %workspace.display(),

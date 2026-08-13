@@ -75,6 +75,16 @@ fn kt_restart_daemon(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Stop the daemon and exit.
+///
+/// The same path as the tray's Quit item, so there is one way to actually stop
+/// serving no matter which surface asked.
+#[tauri::command]
+fn kt_quit(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.supervisor.stop();
+    app.exit(0);
+}
+
 /// Closing the window hides it; the daemon keeps serving. Quitting is an
 /// explicit choice from the tray (docs/architecture.md section 3).
 fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
@@ -137,13 +147,18 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // The folder picker behind "Add an app". Picking a folder is the one
+        // thing the daemon cannot do for itself: it has no window to put a
+        // native panel on.
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             supervisor: Arc::clone(&supervisor),
         })
         .invoke_handler(tauri::generate_handler![
             kt_call,
             kt_health,
-            kt_restart_daemon
+            kt_restart_daemon,
+            kt_quit
         ])
         .setup(move |app| {
             build_tray(app.handle())?;

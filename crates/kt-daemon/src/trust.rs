@@ -205,7 +205,12 @@ mod tests {
     #[test]
     fn redeeming_a_link_records_the_device_and_leaves_it_pending() {
         let trust = trust();
-        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        let invite = Invite::new(
+            "trip",
+            "For book club",
+            InvitePolicy::default(),
+            Trust::now(),
+        );
         trust.store.create_invite(&invite).expect("creates");
 
         let redemption = trust
@@ -243,7 +248,12 @@ mod tests {
     #[test]
     fn a_forwarded_pinned_link_is_refused() {
         let trust = trust();
-        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        let invite = Invite::new(
+            "trip",
+            "For book club",
+            InvitePolicy::default(),
+            Trust::now(),
+        );
         trust.store.create_invite(&invite).expect("creates");
 
         // Two genuinely different browsers: neither presents a cookie, so
@@ -272,7 +282,12 @@ mod tests {
         // a pinned link refuse the very person it was pinned to, the second
         // time they opened it.
         let trust = trust();
-        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        let invite = Invite::new(
+            "trip",
+            "For book club",
+            InvitePolicy::default(),
+            Trust::now(),
+        );
         trust.store.create_invite(&invite).expect("creates");
 
         let first = trust
@@ -296,7 +311,12 @@ mod tests {
     #[test]
     fn an_approved_device_skips_the_wait_page() {
         let trust = trust();
-        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), Trust::now());
+        let invite = Invite::new(
+            "trip",
+            "For book club",
+            InvitePolicy::default(),
+            Trust::now(),
+        );
         trust.store.create_invite(&invite).expect("creates");
 
         let first = trust

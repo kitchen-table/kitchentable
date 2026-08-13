@@ -24,6 +24,9 @@ const welcomeApp: App = {
   url: "http://welcome.local",
   fallback_url: "http://192.168.0.5/welcome",
   path: "/ws/Welcome",
+  size_bytes: 42_000,
+  deployed_at: 1_760_000_000,
+  entry_exists: true,
 };
 
 /// Click forward until the given step is on screen. Reading the counter

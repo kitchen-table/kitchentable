@@ -173,8 +173,12 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             source,
         })?;
 
-    Ok(AppRecord {
-        manifest: AppManifest {
+    // Size and deploy time are derived from the folder, not stored. The
+    // registry measures them on every scan and `app.list` serves records from
+    // the registry, so a stored copy would only ever be a staler answer to the
+    // same question.
+    Ok(AppRecord::unmeasured(
+        AppManifest {
             name: row.get(1)?,
             slug,
             icon: row.get(2)?,
@@ -183,8 +187,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             version: row.get(5)?,
             extra,
         },
-        path: row.get(6)?,
-    })
+        row.get(6)?,
+    ))
 }
 
 fn visibility_str(v: Visibility) -> &'static str {
@@ -212,8 +216,8 @@ mod tests {
     use super::*;
 
     fn record(slug: &str, name: &str) -> AppRecord {
-        AppRecord {
-            manifest: AppManifest {
+        AppRecord::unmeasured(
+            AppManifest {
                 name: name.into(),
                 slug: slug.into(),
                 icon: None,
@@ -222,8 +226,8 @@ mod tests {
                 version: 1,
                 extra: serde_json::Map::new(),
             },
-            path: format!("/tmp/ws/{slug}"),
-        }
+            format!("/tmp/ws/{slug}"),
+        )
     }
 
     #[test]

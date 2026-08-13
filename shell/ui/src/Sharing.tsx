@@ -23,8 +23,11 @@ export interface InviteView {
  *
  * The visibility picker is the product's most consequential control, so it
  * spells out what each level means rather than relying on the label.
+ *
+ * A tab of the app detail view, which owns the app's name, URL and the way
+ * back. This renders only the controls.
  */
-export function Sharing({ app, onClose }: { app: App; onClose: () => void }) {
+export function Sharing({ app }: { app: App }) {
   const queryClient = useQueryClient();
 
   const invites = useQuery({
@@ -53,40 +56,8 @@ export function Sharing({ app, onClose }: { app: App; onClose: () => void }) {
   });
 
   return (
-    <section
-      aria-label={`Sharing for ${app.name}`}
-      style={{ padding: "26px 30px", overflowY: "auto", height: "100%" }}
-    >
-      <button
-        type="button"
-        onClick={onClose}
-        style={{
-          border: "none",
-          background: "none",
-          cursor: "pointer",
-          padding: 0,
-          marginBottom: 16,
-          font: "500 12.5px var(--font-sans)",
-          color: "var(--muted)",
-        }}
-      >
-        ← Library
-      </button>
-
-      <h1
-        style={{
-          margin: "0 0 4px",
-          font: "800 24px var(--font-sans)",
-          letterSpacing: "-0.02em",
-        }}
-      >
-        {app.name}
-      </h1>
-      <p style={{ margin: "0 0 24px", font: "400 12.5px var(--font-mono)", color: "var(--muted)" }}>
-        {app.url.replace(/^https?:\/\//, "")}
-      </p>
-
-      <Heading>Who can open it</Heading>
+    <section aria-label={`Sharing for ${app.name}`} style={{ maxWidth: 720 }}>
+      <Heading>Who can open {app.name}</Heading>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 28 }}>
         {VISIBILITY_ORDER.map((level) => (
           <LevelRow

@@ -128,26 +128,44 @@ impl Registry {
             }
         };
 
+        let (size_bytes, deployed_at) = measure(folder);
+        let entry_exists = folder.join(&manifest.entry).is_file();
+
+        if !entry_exists {
+            tracing::warn!(
+                slug = %manifest.slug,
+                entry = %manifest.entry,
+                "app has no entry file; its root URL will 404"
+            );
+        }
+
         Ok(AppRecord {
             manifest,
             path: folder.display().to_string(),
+            size_bytes,
+            deployed_at,
+            entry_exists,
         })
     }
 
     /// Write a default manifest next to the content, so the app is
     /// self-describing and portable: copy the folder elsewhere and it is still
     /// the same app.
+    ///
+    /// (See [`measure`] below for how the Overview tab's size and deploy time
+    /// are derived.)
     fn generate(
         &self,
         folder_name: &str,
         taken: &[String],
         manifest_path: &Path,
     ) -> Result<AppManifest, RegistryError> {
+        let folder = manifest_path.parent().unwrap_or(manifest_path);
         let manifest = AppManifest {
             name: folder_name.to_string(),
             slug: slug::deduplicate(&slug::slugify(folder_name), taken),
             icon: None,
-            entry: "index.html".to_string(),
+            entry: choose_entry(folder),
             visibility: Visibility::Private,
             version: 1,
             extra: serde_json::Map::new(),
@@ -265,6 +283,103 @@ fn is_hidden(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with('.'))
 }
 
+/// Which file a folder should open on.
+///
+/// `index.html` is the convention and wins whenever it is there. The fallbacks
+/// exist because the product's claim is that *any* folder becomes an app, and
+/// plenty of folders worth serving are one exported page and its assets - a
+/// design tool export, a saved article, a rendered notebook. Defaulting those
+/// to `index.html` produced an app that looked healthy in the library and 404'd
+/// when someone tapped it, which is the worst of both.
+///
+/// Ambiguity is left alone: several pages and no `index.html` means we have no
+/// basis to pick, so the default stands and the app is flagged as having no
+/// entry rather than opening on whichever file sorted first.
+fn choose_entry(folder: &Path) -> String {
+    const DEFAULT: &str = "index.html";
+
+    if folder.join(DEFAULT).is_file() {
+        return DEFAULT.to_string();
+    }
+    if folder.join("index.htm").is_file() {
+        return "index.htm".to_string();
+    }
+
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return DEFAULT.to_string();
+    };
+
+    let mut pages: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file() && !is_hidden(&entry.path()))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let lower = name.to_lowercase();
+            (lower.ends_with(".html") || lower.ends_with(".htm")).then_some(name)
+        })
+        .collect();
+
+    match pages.len() {
+        1 => pages.remove(0),
+        _ => DEFAULT.to_string(),
+    }
+}
+
+/// Total bytes and last-modified time for an app folder.
+///
+/// Both are for the Overview tab: "12.4 MB bundle" and "deployed 2 hours ago".
+/// Until deploys exist (checklist D6) the newest mtime in the tree is the
+/// honest answer to "when did this last change", and it is what someone dragging
+/// files into a folder would expect the app to notice.
+///
+/// Walks iteratively rather than recursively so a symlink loop or a
+/// pathologically deep tree cannot blow the stack, skips hidden entries to
+/// match what the server will serve, and does not follow symlinks out of the
+/// folder - a link to `/` would otherwise measure the whole disk.
+fn measure(folder: &Path) -> (u64, Option<u64>) {
+    let mut bytes = 0u64;
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![folder.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_hidden(&path) {
+                continue;
+            }
+            // `symlink_metadata` does not traverse, so a link is measured as
+            // the link rather than as whatever it points at.
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                bytes = bytes.saturating_add(meta.len());
+            }
+
+            if let Ok(modified) = meta.modified() {
+                if newest.is_none_or(|current| modified > current) {
+                    newest = Some(modified);
+                }
+            }
+        }
+    }
+
+    let seconds = newest.and_then(|t| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    });
+
+    (bytes, seconds)
+}
+
 /// Ignore noise the editor makes: dotfiles, swap files, and macOS metadata.
 fn is_interesting(event: &notify::Event) -> bool {
     event.paths.iter().any(|p| {
@@ -298,6 +413,85 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].manifest.slug, "trip-planner");
         assert_eq!(apps[0].manifest.name, "Trip Planner");
+    }
+
+    #[test]
+    fn a_lone_page_becomes_the_entry_when_there_is_no_index() {
+        // The case that sent someone to a 404 on their phone: a design tool
+        // export is one .html file and its assets, and nothing is named index.
+        let ws = workspace_with(&[(
+            "Trip Briefing",
+            &[
+                ("Trip Briefing.dc.html", "<h1>lisbon</h1>"),
+                ("support.js", "// assets"),
+            ],
+        )]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps[0].manifest.entry, "Trip Briefing.dc.html");
+        assert!(apps[0].entry_exists);
+    }
+
+    #[test]
+    fn index_html_wins_whenever_it_is_there() {
+        let ws = workspace_with(&[(
+            "Site",
+            &[
+                ("index.html", "<h1>hi</h1>"),
+                ("about.html", "<h1>about</h1>"),
+            ],
+        )]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps[0].manifest.entry, "index.html");
+    }
+
+    #[test]
+    fn several_pages_and_no_index_is_left_alone_and_flagged() {
+        // Nothing here says which page is the front door, and guessing wrong is
+        // worse than saying so.
+        let ws = workspace_with(&[(
+            "Notes",
+            &[("one.html", "<h1>1</h1>"), ("two.html", "<h1>2</h1>")],
+        )]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps[0].manifest.entry, "index.html");
+        assert!(
+            !apps[0].entry_exists,
+            "should be flagged, not silently broken"
+        );
+    }
+
+    #[test]
+    fn an_app_whose_entry_is_missing_is_flagged() {
+        // The app is otherwise healthy - registered, announced, gated - so
+        // nothing else would ever reveal that its root URL is a 404.
+        let ws = workspace_with(&[("Empty", &[("notes.txt", "no page here")])]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps.len(), 1);
+        assert!(!apps[0].entry_exists);
+    }
+
+    #[test]
+    fn a_hand_written_entry_is_respected_even_when_it_is_wrong() {
+        // The manifest is the user's file. Rewriting it because we disagree
+        // would be worse than reporting that it does not resolve.
+        let ws = workspace_with(&[(
+            "Site",
+            &[
+                (
+                    "app.json",
+                    r#"{"name":"Site","slug":"site","entry":"missing.html"}"#,
+                ),
+                ("index.html", "<h1>hi</h1>"),
+            ],
+        )]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps[0].manifest.entry, "missing.html");
+        assert!(!apps[0].entry_exists);
     }
 
     #[test]

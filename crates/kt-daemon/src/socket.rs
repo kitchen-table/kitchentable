@@ -162,6 +162,8 @@ mod tests {
             },
             serving: ServingState::Serving,
             started: Instant::now(),
+            // Nothing to rescan: these tests drive the library directly.
+            rescan: std::sync::Arc::new(|| {}),
         })
     }
 
