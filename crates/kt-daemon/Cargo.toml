@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 axum = "0.8.9"
 kt-auth = { version = "0.1.0", path = "../kt-auth" }
+kt-certs = { version = "0.1.0", path = "../kt-certs" }
 kt-mdns = { version = "0.1.0", path = "../kt-mdns" }
 kt-registry = { version = "0.1.0", path = "../kt-registry" }
 kt-server = { version = "0.1.0", path = "../kt-server" }

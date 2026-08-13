@@ -8,7 +8,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -48,25 +48,23 @@ impl Daemon {
         // every test in this binary fighting for one socket.
         let port = 18400 + (std::process::id() % 500) as u16 * 20 + seq as u16;
 
-        let child = Command::new(daemon_binary())
-            .env("HOME", &home)
-            .env("KT_WORKSPACE", &workspace)
-            .env("KT_PORTS", port.to_string())
-            // Announcing on the network from a test would publish junk
-            // hostnames on whatever LAN CI happens to sit on.
-            .env("KT_NO_MDNS", "1")
-            .env("RUST_LOG", "warn")
-            .spawn()
-            .expect("starts the daemon");
-
         let daemon = Self {
-            child,
+            child: spawn(&home, &workspace, port),
             home,
             workspace,
             port,
         };
         daemon.wait_until_ready();
         daemon
+    }
+
+    /// Stop the daemon and start it again on the same HOME, workspace and
+    /// port - the update-and-relaunch a household actually experiences.
+    fn restart(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child = spawn(&self.home, &self.workspace, self.port);
+        self.wait_until_ready();
     }
 
     fn socket(&self) -> PathBuf {
@@ -157,21 +155,39 @@ impl Daemon {
     /// the request is not treated as the owner's own browser. This is the only
     /// way to exercise the gate over a real socket.
     fn get_as_stranger(&self, path: &str) -> (u16, String) {
+        let (status, body, _) = self.get_as_stranger_with_cookie(path, None);
+        (status, body)
+    }
+
+    /// A stranger's request carrying `cookie`, and whatever session the daemon
+    /// hands back.
+    ///
+    /// Returning the cookie is what makes a *second* visit testable, and the
+    /// second visit is where the interesting bugs live.
+    fn get_as_stranger_with_cookie(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+    ) -> (u16, String, Option<String>) {
         use std::net::TcpStream;
 
         let Some(addr) = kt_mdns::primary_ipv4() else {
             // No network at all: skip rather than fail, so an isolated CI
             // runner does not report a false problem.
-            return (0, String::new());
+            return (0, String::new(), None);
         };
 
         let mut stream = TcpStream::connect((addr, self.port)).expect("connects");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("sets timeout");
+        let cookie_header = match cookie {
+            Some(c) => format!("Cookie: {c}\r\n"),
+            None => String::new(),
+        };
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\n{cookie_header}Connection: close\r\n\r\n"
         )
         .expect("writes request");
 
@@ -183,8 +199,19 @@ impl Daemon {
             .nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-        (status, body.to_string())
+        let (headers, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+
+        // Just the name=value pair, dropping Path/HttpOnly/Max-Age, which is
+        // all a browser would send back.
+        let minted = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("set-cookie: ")
+                    .or(line.strip_prefix("Set-Cookie: "))
+            })
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+
+        (status, body.to_string(), minted)
     }
 
     fn set_visibility(&self, folder: &str, visibility: &str) {
@@ -223,6 +250,24 @@ impl Drop for Daemon {
             let _ = std::fs::remove_dir_all(base);
         }
     }
+}
+
+fn spawn(home: &Path, workspace: &Path, port: u16) -> Child {
+    Command::new(daemon_binary())
+        .env("HOME", home)
+        .env("KT_WORKSPACE", workspace)
+        .env("KT_PORTS", port.to_string())
+        // Announcing on the network from a test would publish junk
+        // hostnames on whatever LAN CI happens to sit on.
+        .env("KT_NO_MDNS", "1")
+        // The Keychain is per-user, not per-HOME, so every daemon in this
+        // suite would share one session key and defeat the isolation the
+        // scratch HOME above exists to provide - and on a developer's machine
+        // a test run would rewrite the key their real daemon is using.
+        .env("KT_NO_KEYCHAIN", "1")
+        .env("RUST_LOG", "warn")
+        .spawn()
+        .expect("starts the daemon")
 }
 
 fn daemon_binary() -> PathBuf {
@@ -673,6 +718,73 @@ fn approving_a_waiting_device_lets_it_in_and_names_it() {
         .expect("still listed");
     assert_eq!(device["name"], "Kitchen iPad", "approving also named it");
     assert_eq!(device["status"], "approved");
+}
+
+#[test]
+fn an_approved_device_stays_approved_across_a_restart() {
+    // The session key used to be generated at every start, so an update - or
+    // a crash, or a laptop lid - silently invalidated every session in the
+    // house and asked everyone to pair again. Unit tests could not see it:
+    // it takes a second process lifetime to notice.
+    let mut daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+    daemon.wait_for("invited to stick", |apps| {
+        apps.as_array()
+            .is_some_and(|a| a.iter().any(|app| app["visibility"] == "invited"))
+    });
+
+    let (status, _, cookie) = daemon.get_as_stranger_with_cookie("/portugal/", None);
+    if status == 0 {
+        return; // no network on this runner
+    }
+    let cookie = cookie.expect("the wait page mints a session");
+
+    let devices = daemon.call("device.list", None);
+    let id = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .and_then(|d| d["id"].as_str())
+        .expect("the stranger is waiting")
+        .to_string();
+    daemon.call("device.approve", Some(serde_json::json!({ "id": id })));
+
+    // Note what is *not* asserted here: an invited app answers 200 either way,
+    // because the wait page is a courtesy rather than a refusal. The body is
+    // the only thing that tells being let in apart from being asked to wait.
+    let (status, body, _) = daemon.get_as_stranger_with_cookie("/portugal/", Some(&cookie));
+    assert_eq!(status, 200);
+    assert!(body.contains("portugal"), "an approved device gets the app");
+
+    daemon.restart();
+    daemon.wait_for("the app to come back", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    // The same cookie, against a daemon that has been through a whole process
+    // lifetime since minting it.
+    let (_, body, _) = daemon.get_as_stranger_with_cookie("/portugal/", Some(&cookie));
+    assert!(
+        !body.contains("Waiting for"),
+        "the restart sent an approved device back to the wait page"
+    );
+    assert!(
+        body.contains("portugal"),
+        "the session did not survive the restart"
+    );
+
+    // And they are still the same device, rather than a second stranger the
+    // owner has to approve all over again.
+    let devices = daemon.call("device.list", None);
+    let after = devices.as_array().expect("array");
+    assert_eq!(after.len(), 1, "no duplicate device was created: {devices}");
+    assert_eq!(after[0]["id"], id.as_str());
+    assert_eq!(after[0]["status"], "approved");
 }
 
 #[test]
