@@ -233,6 +233,7 @@ mod tests {
             // Nothing to rescan: these tests drive the library directly.
             events: crate::rpc::Events::new(),
             presence: std::sync::Arc::new(kt_server::Presence::new()),
+            install_key: None,
             rescan: std::sync::Arc::new(|| {}),
         })
     }
