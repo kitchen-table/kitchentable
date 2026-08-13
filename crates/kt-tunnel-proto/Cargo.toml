@@ -8,3 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
+ed25519-dalek = "3.0.0"
+getrandom = "0.4.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
