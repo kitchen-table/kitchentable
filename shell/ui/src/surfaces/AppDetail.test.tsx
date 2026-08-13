@@ -22,6 +22,7 @@ function app(over: Partial<App> = {}): App {
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     deployed_at: Math.floor(Date.now() / 1000) - 7200,
+    entry_exists: true,
     ...over,
   };
 }
@@ -116,6 +117,20 @@ describe("AppDetail", () => {
 
     show({ hostname: "trip-planner.local" });
     expect(screen.queryByText(/^or 192\.168\.0\.5/)).toBeNull();
+  });
+
+  it("explains a missing entry file, on every tab", () => {
+    // The only failure with no visible symptom until someone taps the link.
+    const { unmount } = show({ entry: "index.html", entry_exists: false }, "devices");
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("no page to open");
+    expect(alert.textContent).toContain("index.html");
+    expect(alert.textContent).toContain("/ws/Trip Planner");
+    unmount();
+
+    show({ entry_exists: true });
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("says so when nothing has happened yet", async () => {

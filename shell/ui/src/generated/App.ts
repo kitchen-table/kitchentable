@@ -34,4 +34,9 @@ size_bytes: number,
  * Unix seconds when the content last changed. Absent when the filesystem
  * does not report it.
  */
-deployed_at?: number, };
+deployed_at?: number, 
+/**
+ * Whether `entry` is actually in the folder. False means the app's root
+ * URL is a 404 even though everything else about it is healthy.
+ */
+entry_exists: boolean, };

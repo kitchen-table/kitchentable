@@ -177,6 +177,7 @@ export function AppDetail({
       </header>
 
       <div role="tabpanel" style={{ padding: "24px 30px", flex: 1, minHeight: 0 }}>
+        {!app.entry_exists && <NoEntry app={app} />}
         {tab === "overview" && <Overview app={app} onTab={onTab} />}
         {tab === "sharing" && <Sharing app={app} />}
         {tab !== "overview" && tab !== "sharing" && (
@@ -184,6 +185,58 @@ export function AppDetail({
             {APP_TAB_LABELS[tab]} is not built yet.
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The one failure that hides completely.
+ *
+ * An app with no entry file is registered, announced and gated exactly like a
+ * working one; the only symptom is a 404, on a phone, after someone has already
+ * been sent the link. So it is stated at the top of every tab, with both fixes
+ * spelled out rather than described.
+ */
+function NoEntry({ app }: { app: App }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        background: "var(--danger-tint)",
+        border: "1px solid var(--danger)",
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 20,
+      }}
+    >
+      <div
+        style={{
+          font: "700 13.5px var(--font-sans)",
+          color: "var(--danger)",
+          marginBottom: 5,
+        }}
+      >
+        This app has no page to open
+      </div>
+      <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--ink2)" }}>
+        Its folder has no{" "}
+        <code style={{ fontFamily: "var(--font-mono)" }}>{app.entry}</code>, so the
+        address above answers 404. Either rename a page in the folder to{" "}
+        <code style={{ fontFamily: "var(--font-mono)" }}>{app.entry}</code>, or point{" "}
+        <code style={{ fontFamily: "var(--font-mono)" }}>entry</code> in{" "}
+        <code style={{ fontFamily: "var(--font-mono)" }}>app.json</code> at the file
+        you want opened first.
+      </div>
+      <div
+        style={{
+          marginTop: 8,
+          font: "400 11px var(--font-mono)",
+          color: "var(--faint)",
+          wordBreak: "break-all",
+        }}
+      >
+        {app.path}
       </div>
     </div>
   );

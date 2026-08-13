@@ -21,6 +21,7 @@ function app(over: Partial<App> = {}): App {
     path: "/ws/Trip",
     size_bytes: 42_000,
     deployed_at: 1_760_000_000,
+    entry_exists: true,
     ...over,
   };
 }

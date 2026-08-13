@@ -294,6 +294,19 @@ function Card({ app, onOpen }: { app: App; onOpen: () => void }) {
         <span style={{ font: "500 10.5px var(--font-mono)", color: "var(--muted)" }}>
           v{app.version}
         </span>
+        {/* Loudest badge on the card, and the only one that means the app does
+            not work. Everything else about it is healthy, so nothing else here
+            would ever reveal that its URL is a 404. */}
+        {!app.entry_exists && (
+          <Badge
+            colour="var(--danger)"
+            background="var(--paper)"
+            border="var(--danger)"
+            title={`There is no ${app.entry} in this folder, so the app's address will not open`}
+          >
+            won&rsquo;t open
+          </Badge>
+        )}
         {insecure && (
           <Badge
             colour="var(--danger)"

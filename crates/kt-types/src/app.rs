@@ -88,6 +88,13 @@ pub struct AppRecord {
     /// When the content last changed, in unix seconds. `None` when the
     /// filesystem will not say - some network mounts, and Linux before 4.11.
     pub deployed_at: Option<u64>,
+    /// Whether the manifest's `entry` actually exists in the folder.
+    ///
+    /// False means every request to the app's root is a 404. The app is
+    /// otherwise entirely healthy - registered, announced, gated - which is
+    /// exactly why it has to be said out loud rather than left to be discovered
+    /// by tapping the link on a phone.
+    pub entry_exists: bool,
 }
 
 impl AppRecord {
@@ -103,6 +110,9 @@ impl AppRecord {
             path,
             size_bytes: 0,
             deployed_at: None,
+            // Assumed present. Claiming a missing entry without having looked
+            // would put a "will not open" warning on a working app.
+            entry_exists: true,
         }
     }
 
@@ -136,6 +146,7 @@ impl AppRecord {
             // number whose only job is to render as "12.4 MB".
             size_bytes: self.size_bytes.min(u32::MAX as u64) as u32,
             deployed_at: self.deployed_at.map(|t| t.min(u32::MAX as u64) as u32),
+            entry_exists: self.entry_exists,
         }
     }
 }
@@ -189,6 +200,9 @@ pub struct App {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub deployed_at: Option<u32>,
+    /// Whether `entry` is actually in the folder. False means the app's root
+    /// URL is a 404 even though everything else about it is healthy.
+    pub entry_exists: bool,
 }
 
 #[cfg(test)]
@@ -219,6 +233,7 @@ mod tests {
             path: "/ws/trip".into(),
             size_bytes: 42_000,
             deployed_at: Some(1_760_000_000),
+            entry_exists: true,
         }
     }
 

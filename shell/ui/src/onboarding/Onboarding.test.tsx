@@ -26,6 +26,7 @@ const welcomeApp: App = {
   path: "/ws/Welcome",
   size_bytes: 42_000,
   deployed_at: 1_760_000_000,
+  entry_exists: true,
 };
 
 /// Click forward until the given step is on screen. Reading the counter

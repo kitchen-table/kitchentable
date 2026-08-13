@@ -15,6 +15,7 @@ function app(over: Partial<App> = {}): App {
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     deployed_at: 1_760_000_000,
+    entry_exists: true,
     ...over,
   };
 }
@@ -122,6 +123,18 @@ describe("Library", () => {
   it("does not flag HTTPS as not encrypted", () => {
     show({ apps: [app({ url: "https://trip-planner.local" })] });
     expect(screen.queryByText("Not encrypted")).toBeNull();
+  });
+
+  it("flags an app whose entry file is missing", () => {
+    // The app is registered, announced and gated exactly like a working one.
+    // Nothing else on the card would reveal that its URL is a 404.
+    show({ apps: [app({ entry_exists: false })] });
+    expect(screen.getByText(/won.t open/)).toBeDefined();
+  });
+
+  it("does not flag an app whose entry file is there", () => {
+    show({ apps: [app({ entry_exists: true })] });
+    expect(screen.queryByText(/won.t open/)).toBeNull();
   });
 
   it("renders a scannable QR code per app", () => {
