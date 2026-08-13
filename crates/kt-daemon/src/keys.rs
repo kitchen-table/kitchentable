@@ -49,7 +49,7 @@ fn load_or_create_within(secrets: Arc<dyn SecretStore>, budget: Duration) -> Arc
     });
 
     match rx.recv_timeout(budget) {
-        Ok(keys) => keys,
+        Ok((keys, _)) => keys,
         Err(_) => {
             tracing::warn!(
                 store = secrets.describe(),
@@ -61,28 +61,33 @@ fn load_or_create_within(secrets: Arc<dyn SecretStore>, budget: Duration) -> Arc
     }
 }
 
-/// The part that talks to the keystore, and may block for as long as it likes.
-fn resolve(secrets: &dyn SecretStore) -> Arc<SessionKeys> {
-    let stored = match secrets.get(SESSION_KEY) {
-        Ok(stored) => stored,
-        Err(e) => {
-            tracing::warn!(
-                store = secrets.describe(),
-                "could not read the session key ({e}); \
-                 viewers will have to pair again after this restart"
-            );
-            return Arc::new(SessionKeys::generate());
-        }
-    };
+/// What became of the key. Returned so the outcome can be asserted on; the
+/// reasons behind it are logged where they are discovered.
+#[derive(Debug, PartialEq, Eq)]
+enum Persistence {
+    /// Came back from the keystore, so sessions minted before the restart
+    /// still verify.
+    Loaded,
+    /// Newly made, saved, and read back to prove it.
+    Saved,
+    /// Newly made and not persisted. Serving is unaffected; the next restart
+    /// asks everyone to pair again.
+    Ephemeral,
+}
 
-    match stored {
-        Some(bytes) => match <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
+/// The part that talks to the keystore, and may block for as long as it likes.
+fn resolve(secrets: &dyn SecretStore) -> (Arc<SessionKeys>, Persistence) {
+    match secrets.get(SESSION_KEY) {
+        Ok(Some(bytes)) => match <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
             Ok(seed) => {
                 tracing::info!(
                     store = secrets.describe(),
                     "session key loaded; existing sessions still work"
                 );
-                return Arc::new(SessionKeys::from_bytes(&seed));
+                return (
+                    Arc::new(SessionKeys::from_bytes(&seed)),
+                    Persistence::Loaded,
+                );
             }
             Err(_) => tracing::warn!(
                 store = secrets.describe(),
@@ -91,22 +96,55 @@ fn resolve(secrets: &dyn SecretStore) -> Arc<SessionKeys> {
                 "the stored session key is the wrong size; replacing it"
             ),
         },
-        None => tracing::info!(store = secrets.describe(), "no session key yet; making one"),
+        Ok(None) => tracing::info!(store = secrets.describe(), "no session key yet; making one"),
+        // Deliberately falls through to replacing it rather than giving up. An
+        // entry we cannot read is worth no more than no entry at all, and
+        // leaving it there means every future start degrades the same way.
+        Err(e) => tracing::warn!(
+            store = secrets.describe(),
+            "could not read the stored session key ({e}); replacing it"
+        ),
     }
 
-    let keys = SessionKeys::generate();
-    match secrets.set(SESSION_KEY, &keys.to_bytes()) {
-        Ok(()) => tracing::info!(
-            store = secrets.describe(),
-            "session key saved; sessions will survive a restart"
-        ),
-        Err(e) => tracing::warn!(
+    make_and_save(secrets)
+}
+
+fn make_and_save(secrets: &dyn SecretStore) -> (Arc<SessionKeys>, Persistence) {
+    let keys = Arc::new(SessionKeys::generate());
+    let seed = keys.to_bytes();
+
+    if let Err(e) = secrets.set(SESSION_KEY, &seed) {
+        tracing::warn!(
             store = secrets.describe(),
             "could not save the session key ({e}); \
              viewers will have to pair again after the next restart"
-        ),
+        );
+        return (keys, Persistence::Ephemeral);
     }
-    Arc::new(keys)
+
+    // Read it back rather than trusting the write. A keychain item carries its
+    // own access control list, so a write can be accepted and the result still
+    // be unreadable by the very process that wrote it - which is how this
+    // arrived at claiming "sessions will survive a restart" when they did not.
+    // The only honest evidence of persistence is getting the key back.
+    match secrets.get(SESSION_KEY) {
+        Ok(Some(back)) if back.as_slice() == seed.as_slice() => {
+            tracing::info!(
+                store = secrets.describe(),
+                "session key saved; sessions will survive a restart"
+            );
+            (keys, Persistence::Saved)
+        }
+        other => {
+            tracing::warn!(
+                store = secrets.describe(),
+                readable = matches!(other, Ok(Some(_))),
+                "the keystore accepted the session key but did not give it back; \
+                 viewers will have to pair again after the next restart"
+            );
+            (keys, Persistence::Ephemeral)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +154,24 @@ mod tests {
     use kt_certs::{MemoryStore, SecretError};
 
     const NOW: i64 = 1_700_000_000;
+
+    /// A keystore that takes a write and then will not give it back, the way a
+    /// keychain item whose ACL names a different binary does.
+    struct WriteOnly;
+
+    impl SecretStore for WriteOnly {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, SecretError> {
+            Err(SecretError::Keystore("authentication failed".into()))
+        }
+
+        fn set(&self, _: &str, _: &[u8]) -> Result<(), SecretError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> &'static str {
+            "a keystore that accepts writes it will not return"
+        }
+    }
 
     /// A keystore that never answers, the way a keychain waiting on a dialog
     /// nobody can click never answers.
@@ -161,6 +217,62 @@ mod tests {
         let saved = store.get(SESSION_KEY).expect("reads").expect("was saved");
         assert_eq!(saved.len(), KEY_LEN);
         assert_eq!(saved, keys.to_bytes(), "saved the key it is actually using");
+    }
+
+    #[test]
+    fn a_write_that_cannot_be_read_back_is_not_called_saved() {
+        // The keychain accepts a write to an item whose ACL names a different
+        // binary, and the result is still unreadable. Trusting the write meant
+        // logging "sessions will survive a restart" when they would not - a
+        // line that asserts the opposite of the truth is worse than no line.
+        let (_, persistence) = resolve(&WriteOnly);
+        assert_eq!(persistence, Persistence::Ephemeral);
+    }
+
+    #[test]
+    fn an_unreadable_entry_is_replaced_rather_than_left_to_fail_forever() {
+        // A read failure used to give up, so a single bad entry degraded every
+        // future start. There is nothing to lose by overwriting: an entry we
+        // cannot read is worth exactly as much as no entry.
+        struct UnreadableOnce {
+            inner: MemoryStore,
+            poisoned: std::sync::atomic::AtomicBool,
+        }
+
+        impl SecretStore for UnreadableOnce {
+            fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
+                if self.poisoned.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(SecretError::Keystore("authentication failed".into()));
+                }
+                self.inner.get(name)
+            }
+
+            fn set(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
+                // Writing clears the bad entry, the way delete-and-add does.
+                self.poisoned
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.inner.set(name, secret)
+            }
+
+            fn describe(&self) -> &'static str {
+                "a keystore holding one unreadable entry"
+            }
+        }
+
+        let store = UnreadableOnce {
+            inner: MemoryStore::new(),
+            poisoned: std::sync::atomic::AtomicBool::new(true),
+        };
+
+        let (keys, persistence) = resolve(&store);
+        assert_eq!(persistence, Persistence::Saved, "it healed itself");
+
+        // And the next start loads what the healing run wrote.
+        let device = DeviceId::generate();
+        let cookie = keys.mint(&device, NOW);
+        let (after_restart, persistence) = resolve(&store);
+        assert_eq!(persistence, Persistence::Loaded);
+        assert!(after_restart.verify(&cookie, NOW).is_ok());
     }
 
     #[test]
