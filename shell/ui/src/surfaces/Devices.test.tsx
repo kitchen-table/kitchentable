@@ -78,14 +78,14 @@ describe("Devices", () => {
 
     await waitFor(() => expect(screen.getByText("iPhone wants access")).toBeDefined());
     fireEvent.change(screen.getByLabelText("Name this device"), {
-      target: { value: "Priya's iPhone" },
+      target: { value: "Kitchen iPad" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(paramsOf("device.approve")).toBeDefined());
     expect(paramsOf("device.approve")?.params).toEqual({
       id: "dev-1",
-      name: "Priya's iPhone",
+      name: "Kitchen iPad",
     });
   });
 
@@ -113,7 +113,7 @@ describe("Devices", () => {
   });
 
   it("lists approved devices and lets them be revoked", async () => {
-    withDevices([device({ status: "approved", name: "Priya's iPhone" })]);
+    withDevices([device({ status: "approved", name: "Kitchen iPad" })]);
     show();
 
     await waitFor(() => expect(screen.getByText("Approved devices · 1")).toBeDefined());

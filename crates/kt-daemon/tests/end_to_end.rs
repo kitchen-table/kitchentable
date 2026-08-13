@@ -660,7 +660,7 @@ fn approving_a_waiting_device_lets_it_in_and_names_it() {
     // The owner approves, naming the device in the same call.
     let approved = daemon.call(
         "device.approve",
-        Some(serde_json::json!({ "id": id, "name": "Priya's iPhone" })),
+        Some(serde_json::json!({ "id": id, "name": "Kitchen iPad" })),
     );
     assert_eq!(approved["status"], "approved");
 
@@ -671,7 +671,7 @@ fn approving_a_waiting_device_lets_it_in_and_names_it() {
         .iter()
         .find(|d| d["id"] == id.as_str())
         .expect("still listed");
-    assert_eq!(device["name"], "Priya's iPhone", "approving also named it");
+    assert_eq!(device["name"], "Kitchen iPad", "approving also named it");
     assert_eq!(device["status"], "approved");
 }
 

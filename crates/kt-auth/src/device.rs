@@ -56,7 +56,7 @@ pub enum DeviceStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub id: DeviceId,
-    /// Something a person recognises: "Priya's iPhone". Suggested from the
+    /// Something a person recognises: "Kitchen iPad". Suggested from the
     /// user agent at approval time and editable afterwards.
     pub name: String,
     pub status: DeviceStatus,

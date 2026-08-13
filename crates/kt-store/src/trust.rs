@@ -372,11 +372,11 @@ mod tests {
         let d = device();
         store.upsert_device(&d).expect("inserts");
         store
-            .rename_device(&d.id, "Priya's iPhone")
+            .rename_device(&d.id, "Kitchen iPad")
             .expect("renames");
 
         let back = store.get_device(&d.id).expect("reads").expect("exists");
-        assert_eq!(back.name, "Priya's iPhone");
+        assert_eq!(back.name, "Kitchen iPad");
         assert_eq!(back.fingerprint, d.fingerprint);
     }
 
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn redemption_pins_only_the_first_device() {
         let store = Store::in_memory().expect("opens");
-        let invite = Invite::new("trip", "For Sam", InvitePolicy::default(), NOW);
+        let invite = Invite::new("trip", "For book club", InvitePolicy::default(), NOW);
         store.create_invite(&invite).expect("creates");
 
         // A device is always registered before it can pin an invite - the

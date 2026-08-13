@@ -164,7 +164,7 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
         "device.list" => json(&ctx.store.list_devices().map_err(store_error)?),
 
         // Approving takes an optional name so the prompt can do both at once:
-        // the owner is looking at "iPhone" and typing "Priya's iPhone", and two
+        // the owner is looking at "iPhone" and typing "Kitchen iPad", and two
         // round trips could leave a device approved but unnamed.
         "device.approve" => {
             let id = device_param(request)?;

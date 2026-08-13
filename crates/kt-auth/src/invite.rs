@@ -101,7 +101,7 @@ pub struct Invite {
     pub token: InviteToken,
     pub app_slug: String,
     /// Shown in the sharing panel so a list of links is legible: "For the
-    /// family", "For Sam".
+    /// family", "For book club".
     pub label: String,
     pub policy: InvitePolicy,
     pub created_at: i64,
