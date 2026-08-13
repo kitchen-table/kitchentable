@@ -105,7 +105,12 @@ impl TrustSource for AllowAll {
     fn redeem(&self, _headers: &axum::http::HeaderMap, _token: &str) -> Result<Redemption, String> {
         Err("not used here".into())
     }
-    fn request_access(&self, _headers: &axum::http::HeaderMap, slug: &str) -> Redemption {
+    fn request_access(
+        &self,
+        _headers: &axum::http::HeaderMap,
+        slug: &str,
+        _peer: Option<std::net::IpAddr>,
+    ) -> Redemption {
         Redemption {
             cookie: None,
             app_slug: slug.to_string(),

@@ -139,3 +139,40 @@ mod tests {
         assert!(!UnsupportedAnnouncer.is_live());
     }
 }
+
+/// No network lookup at all: the platform has no implementation, or a test does
+/// not want one. Callers fall back to whatever the user agent suggested.
+pub struct NoDiscoverer;
+
+impl crate::Discoverer for NoDiscoverer {
+    fn name_for(&self, _addr: std::net::Ipv4Addr, _within: std::time::Duration) -> Option<String> {
+        None
+    }
+
+    fn is_live(&self) -> bool {
+        false
+    }
+}
+
+/// A discoverer with a fixed answer sheet, for tests.
+#[derive(Default)]
+pub struct MockDiscoverer {
+    names: std::collections::HashMap<std::net::Ipv4Addr, String>,
+}
+
+impl MockDiscoverer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with(mut self, addr: std::net::Ipv4Addr, name: &str) -> Self {
+        self.names.insert(addr, name.to_string());
+        self
+    }
+}
+
+impl crate::Discoverer for MockDiscoverer {
+    fn name_for(&self, addr: std::net::Ipv4Addr, _within: std::time::Duration) -> Option<String> {
+        self.names.get(&addr).cloned()
+    }
+}

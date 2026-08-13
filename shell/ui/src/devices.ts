@@ -12,6 +12,8 @@ export interface Device {
   /** Suggested from the user agent at first sight, editable afterwards. */
   name: string;
   status: "pending" | "approved" | "revoked" | "owner";
+  /** Where `name` came from. Nothing ever overwrites `owner`. */
+  named_by: "guess" | "network" | "owner";
   user_agent: string;
   /** Short and stable, so two similar devices can be told apart. */
   fingerprint: string;
@@ -80,6 +82,24 @@ export function useDeviceActions() {
   });
 
   return { approve, deny, revoke, rename };
+}
+
+/**
+ * Where a device's name came from, said plainly.
+ *
+ * Worth saying out loud rather than silently pre-filling a better name: for a
+ * product whose pitch is that nothing leaves your desk, a name appearing from
+ * nowhere is unsettling. It also tells the owner how much to trust it.
+ */
+export function nameSource(device: Device): string | null {
+  switch (device.named_by) {
+    case "network":
+      return "the name this device gives itself on your network";
+    case "guess":
+      return "guessed from the browser — worth correcting";
+    case "owner":
+      return null;
+  }
 }
 
 /**

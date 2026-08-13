@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { DeviceIcon } from "../icons";
-import { type Device, describeAgent, useDeviceActions } from "../devices";
+import { type Device, describeAgent, nameSource, useDeviceActions } from "../devices";
 import { Modal, ModalActions, ModalButton } from "./Modal";
 
 /**
@@ -105,10 +105,12 @@ export function PairingModal({
             display: "block",
             marginTop: 6,
             font: "400 11px var(--font-sans)",
-            color: "var(--faint)",
+            color: device.named_by === "network" ? "var(--green)" : "var(--faint)",
           }}
         >
-          Suggested from the browser. You can rename or revoke it any time.
+          {device.named_by === "network" ? "✓ " : ""}
+          {nameSource(device) ?? "Your name for it."} You can rename or revoke it
+          any time.
         </span>
       </label>
 

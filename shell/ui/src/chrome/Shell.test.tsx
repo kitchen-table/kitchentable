@@ -14,6 +14,7 @@ function device(over: Partial<Device> = {}): Device {
     id: "dev-1",
     name: "iPhone",
     status: "pending",
+    named_by: "guess",
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/605.1",
     fingerprint: "f3:9a:21",
     first_seen: 1_760_000_000,
