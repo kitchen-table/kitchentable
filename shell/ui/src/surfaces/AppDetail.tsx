@@ -4,6 +4,7 @@ import { Qr } from "../Qr";
 import { Sharing } from "../Sharing";
 import { type AccessEvent, ago, describe, size } from "../activity";
 import { call } from "../daemon";
+import { Devices } from "./Devices";
 import { APP_TABS, APP_TAB_LABELS, type AppTab, type Surface } from "../navigation";
 import { VISIBILITY, tileColour } from "../visibility";
 
@@ -180,7 +181,8 @@ export function AppDetail({
         {!app.entry_exists && <NoEntry app={app} />}
         {tab === "overview" && <Overview app={app} onTab={onTab} />}
         {tab === "sharing" && <Sharing app={app} />}
-        {tab !== "overview" && tab !== "sharing" && (
+        {tab === "devices" && <Devices />}
+        {tab !== "overview" && tab !== "sharing" && tab !== "devices" && (
           <p style={{ font: "400 14px var(--font-sans)", color: "var(--faint)" }}>
             {APP_TAB_LABELS[tab]} is not built yet.
           </p>

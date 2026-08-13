@@ -163,7 +163,24 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
         // ---- devices --------------------------------------------------
         "device.list" => json(&ctx.store.list_devices().map_err(store_error)?),
 
-        "device.approve" => set_device_status(ctx, request, DeviceStatus::Approved),
+        // Approving takes an optional name so the prompt can do both at once:
+        // the owner is looking at "iPhone" and typing "Priya's iPhone", and two
+        // round trips could leave a device approved but unnamed.
+        "device.approve" => {
+            let id = device_param(request)?;
+            if let Some(name) = optional_string(request, "name") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    ctx.store.rename_device(&id, name).map_err(store_error)?;
+                }
+            }
+            set_device_status(ctx, request, DeviceStatus::Approved)
+        }
+
+        // Denying and revoking land on the same stored status - never silently
+        // upgraded back - but they are different acts and the log should say
+        // which happened, so they are different methods rather than a flag.
+        "device.deny" => set_device_status(ctx, request, DeviceStatus::Revoked),
         "device.revoke" => set_device_status(ctx, request, DeviceStatus::Revoked),
 
         "device.rename" => {
@@ -378,6 +395,28 @@ fn set_device_status(
             detail: None,
         });
     }
+
+    // Who gets in is exactly what the Activity view exists to show, so every
+    // decision is logged with the method that made it - `denied` and `revoked`
+    // reach the same status but are not the same event.
+    let action = match request.method.as_str() {
+        "device.approve" => "paired",
+        "device.deny" => "denied",
+        _ => "revoked",
+    };
+    if let Err(e) = ctx.store.log_access(&kt_store::AccessEvent {
+        at: now(),
+        app_slug: None,
+        device_id: Some(id.as_str().to_string()),
+        actor: "owner".into(),
+        action: action.into(),
+        detail: None,
+    }) {
+        // The decision itself already stuck. Failing the call because the
+        // note about it did not would be the wrong way round.
+        tracing::warn!(error = %e, action, "could not log a device decision");
+    }
+
     json(&serde_json::json!({ "id": id.as_str(), "status": status }))
 }
 

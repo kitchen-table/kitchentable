@@ -5,9 +5,11 @@ import { StatusBar } from "../StatusBar";
 import { AppDetail } from "../surfaces/AppDetail";
 import { quit } from "../daemon";
 import { useAddApp, useFolderDrop } from "../addApp";
+import { pending as pendingDevices, useDevices } from "../devices";
 import { LIBRARY, type Surface } from "../navigation";
 import { useAppearance } from "../theme";
 import { NewAppModal } from "./NewAppModal";
+import { PairingModal } from "./PairingModal";
 import { Sidebar, type McpStatus } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
 
@@ -22,20 +24,31 @@ export function Shell({
   apps,
   status,
   mcp,
-  pending,
 }: {
   apps: App[];
   status?: SysStatus;
   mcp?: McpStatus;
-  /** Devices waiting on a decision, for the title bar badge. */
-  pending: number;
 }) {
   const [surface, setSurface] = useState<Surface>(LIBRARY);
   const [query, setQuery] = useState("");
   const [newApp, setNewApp] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState<string[]>([]);
   const { dark, toggle } = useAppearance();
   const { create, importFolder, pick } = useAddApp();
+
+  const devices = useDevices();
+  const waiting = pendingDevices(devices.data);
+
+  /**
+   * The oldest device still waiting, unless it was dismissed this session.
+   *
+   * Dismissing means "decide later", not "deny" - so the prompt does not come
+   * straight back, but the badge keeps the count and the Devices tab keeps the
+   * row. A device that is genuinely unwanted gets denied, which is a different
+   * button.
+   */
+  const asking = waiting.find((device) => !dismissed.includes(device.id));
 
   /**
    * A folder dropped anywhere on the window is an app, whichever surface is
@@ -77,8 +90,14 @@ export function Shell({
       <TitleBar
         query={query}
         onQuery={setQuery}
-        pending={pending}
-        onPending={() => setSurface({ kind: "activity" })}
+        pending={waiting.length}
+        onPending={() =>
+          // Straight to where the decision is made. Falls back to the library
+          // when there is nothing waiting and no app to hang the tab off.
+          apps[0]
+            ? setSurface({ kind: "app", slug: apps[0].slug, tab: "devices" })
+            : setSurface(LIBRARY)
+        }
         dark={dark}
         onToggleTheme={toggle}
         onNewApp={() => setNewApp(true)}
@@ -106,6 +125,15 @@ export function Shell({
       </div>
 
       <StatusBar status={status} />
+
+      {/* Above every surface, because a phone is waiting on it right now. */}
+      {asking && (
+        <PairingModal
+          device={asking}
+          waiting={waiting.length}
+          onClose={() => setDismissed((ids) => [...ids, asking.id])}
+        />
+      )}
 
       {dropping && !newApp && <DropOverlay />}
       {dropError && (

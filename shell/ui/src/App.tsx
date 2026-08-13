@@ -51,7 +51,7 @@ function Window() {
     );
   }
 
-  return <Shell apps={apps.data ?? []} status={status.data} pending={0} />;
+  return <Shell apps={apps.data ?? []} status={status.data} />;
 }
 
 function Centred({ children }: { children: React.ReactNode }) {

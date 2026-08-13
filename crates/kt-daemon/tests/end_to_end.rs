@@ -615,3 +615,165 @@ fn app_import_refuses_a_folder_already_in_the_workspace() {
         "the message should say why: {error}"
     );
 }
+
+// ---- approving a device -------------------------------------------------
+//
+// The flagship flow, and the one HANDOFF says to run by hand before believing
+// any auth change: mint a link, open it, open it again, approve, refresh.
+// These cover the approving half, which until now had no caller but a human
+// with a socket client.
+
+#[test]
+fn approving_a_waiting_device_lets_it_in_and_names_it() {
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+    daemon.wait_for("invited to stick", |apps| {
+        apps.as_array()
+            .is_some_and(|a| a.iter().any(|app| app["visibility"] == "invited"))
+    });
+
+    // A stranger opens it: refused politely, and remembered as pending.
+    let (status, body) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return; // no network on this runner
+    }
+    assert!(body.contains("Waiting for"), "should be the wait page");
+
+    let devices = daemon.call("device.list", None);
+    let waiting: Vec<_> = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|d| d["status"] == "pending")
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        1,
+        "the stranger should be waiting: {devices}"
+    );
+    let id = waiting[0]["id"].as_str().expect("id").to_string();
+
+    // The owner approves, naming the device in the same call.
+    let approved = daemon.call(
+        "device.approve",
+        Some(serde_json::json!({ "id": id, "name": "Priya's iPhone" })),
+    );
+    assert_eq!(approved["status"], "approved");
+
+    let devices = daemon.call("device.list", None);
+    let device = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["id"] == id.as_str())
+        .expect("still listed");
+    assert_eq!(device["name"], "Priya's iPhone", "approving also named it");
+    assert_eq!(device["status"], "approved");
+}
+
+#[test]
+fn a_device_decision_is_written_to_the_access_log() {
+    // Who gets in is exactly what the Activity view exists to show.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return;
+    }
+
+    let devices = daemon.call("device.list", None);
+    let Some(id) = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .map(|d| d["id"].as_str().expect("id").to_string())
+    else {
+        return;
+    };
+
+    daemon.call("device.deny", Some(serde_json::json!({ "id": id })));
+
+    let events = daemon.call("log.query", Some(serde_json::json!({ "limit": 20 })));
+    assert!(
+        events
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|e| e["action"] == "denied" && e["device_id"] == id.as_str()),
+        "the refusal should be in the log: {events}"
+    );
+}
+
+#[test]
+fn denying_and_revoking_are_told_apart_in_the_log() {
+    // They land on the same stored status, so the log is the only place the
+    // difference survives.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return;
+    }
+    let devices = daemon.call("device.list", None);
+    let Some(id) = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .map(|d| d["id"].as_str().expect("id").to_string())
+    else {
+        return;
+    };
+
+    daemon.call("device.approve", Some(serde_json::json!({ "id": id })));
+    daemon.call("device.revoke", Some(serde_json::json!({ "id": id })));
+
+    let events = daemon.call("log.query", Some(serde_json::json!({ "limit": 20 })));
+    let actions: Vec<&str> = events
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+
+    assert!(actions.contains(&"paired"), "approval logged: {actions:?}");
+    assert!(
+        actions.contains(&"revoked"),
+        "revocation logged: {actions:?}"
+    );
+    assert!(
+        !actions.contains(&"denied"),
+        "this was not a denial: {actions:?}"
+    );
+}
+
+#[test]
+fn approving_an_unknown_device_is_an_error_not_a_silent_success() {
+    let daemon = Daemon::start();
+
+    let error = daemon
+        .try_call(
+            "device.approve",
+            Some(serde_json::json!({ "id": "AAAAAAAAAAAAAAAAAAAAAA" })),
+        )
+        .expect_err("should be refused");
+    assert!(
+        error.contains("not_found") || error.contains("bad_request"),
+        "{error}"
+    );
+}
