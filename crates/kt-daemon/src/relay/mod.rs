@@ -27,8 +27,10 @@
 
 mod backoff;
 mod conn;
+mod session;
 #[cfg(test)]
 mod stub;
+mod wsbytes;
 
 use std::sync::Arc;
 
@@ -70,12 +72,12 @@ impl Config {
 /// Spawned rather than awaited by the daemon: the relay being down must never
 /// be the reason apps stop being served on the local network, which is the
 /// whole product for anyone who has not paid for anything.
-pub async fn run(config: Config, identity: Arc<InstallIdentity>) {
+pub async fn run(config: Config, identity: Arc<InstallIdentity>, router: Arc<axum::Router>) {
     let mut backoff = Backoff::new();
 
     loop {
         let ended = match conn::connect(&config.url, &identity).await {
-            Ok((mut socket, accepted)) => {
+            Ok((socket, accepted)) => {
                 // Only now, on a connection that got all the way through the
                 // handshake. An edge that accepts TCP and hangs up must not
                 // look like success, or the backoff resets into a tight loop.
@@ -86,12 +88,9 @@ pub async fn run(config: Config, identity: Arc<InstallIdentity>) {
                     "relay connected"
                 );
 
-                // Holding the connection open is the next piece of work. For
-                // now the handshake is the whole of it, so say goodbye rather
-                // than dropping the socket and leaving the edge to time out a
-                // connection this end has already finished with.
-                conn::goodbye(&mut socket, kt_tunnel_proto::CloseReason::Draining).await;
-                Ended::Transport("nothing carries requests yet".into())
+                let ended = carry(socket, Arc::clone(&router)).await;
+                tracing::debug!("the relay connection ended: {ended}");
+                ended
             }
             Err(ended) => ended,
         };
@@ -113,6 +112,32 @@ pub async fn run(config: Config, identity: Arc<InstallIdentity>) {
             tracing::debug!(seconds = delay.as_secs(), "waiting before dialling again");
         }
         tokio::time::sleep(delay).await;
+    }
+}
+
+/// Carry streams until the connection ends.
+///
+/// The daemon is the yamux *client* even though every stream on it is opened by
+/// the edge. Which end dials and which end opens streams are separate
+/// questions, and the daemon dials because that is the only direction a home
+/// router allows.
+async fn carry(socket: conn::Socket, router: Arc<axum::Router>) -> Ended {
+    let mut connection = yamux::Connection::new(
+        wsbytes::WsBytes::new(socket),
+        yamux::Config::default(),
+        yamux::Mode::Client,
+    );
+
+    loop {
+        match std::future::poll_fn(|cx| connection.poll_next_inbound(cx)).await {
+            Some(Ok(stream)) => {
+                // One task per stream, so a slow app cannot hold up the
+                // heartbeat or anybody else's page.
+                tokio::spawn(session::dispatch(stream, Arc::clone(&router)));
+            }
+            Some(Err(e)) => return Ended::Transport(e.to_string()),
+            None => return Ended::Transport("the relay closed the tunnel".into()),
+        }
     }
 }
 
