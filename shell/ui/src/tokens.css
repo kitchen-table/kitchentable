@@ -6,8 +6,7 @@
  * base, dark overrides only what changes, and [data-theme] wins over the media
  * query in both directions so an explicit user choice always beats the system.
  *
- * Font files are not bundled yet - the stacks below fall back to the system UI
- * face until they are (checklist D3).
+ * The faces themselves are bundled by fonts.css, which must be imported first.
  */
 
 :root {
@@ -26,6 +25,9 @@
   --ink3: #6b6b6b;
   --muted: #8a8378;
   --faint: #a8a091;
+  /* Dimmer than --faint: for dots and rules that are present but not resting
+     state, e.g. an app that is registered but not currently being viewed. */
+  --idle: #c9c2b4;
 
   /* Accent */
   --accent: #2f6df0;
@@ -38,12 +40,22 @@
   --green-tint: #e9f6f0;
   --gold: #b8862f;
   --gold-tint: #f6efe1;
+  --gold-bd: #ecdcbf;
   --danger: #c0392b;
   --danger-tint: #fdf3f2;
 
   /* Strict relay mode has its own colour so end-to-end never reads as ordinary */
   --strict: #7a4de0;
   --strict-tint: #f0ebfd;
+  --strict-bd: #e0d4fb;
+
+  /* Inverted chip, for the one-per-screen emphatic badge */
+  --chip-ink-bg: #1a1a1a;
+  --chip-ink-fg: #ffffff;
+
+  /* QR modules stay dark in both themes: a phone camera needs the contrast,
+     and inverting a QR code stops some scanners reading it at all. */
+  --qr: #1a1a1a;
 
   /* Visibility levels. The wire value for Household stays `network`. */
   --vis-private: #6b6b6b;
@@ -56,11 +68,22 @@
   --vis-public-tint: #e9f6f0;
 
   --chip: #eeece8;
+  --divider: rgba(0, 0, 0, 0.06);
   --border: rgba(0, 0, 0, 0.08);
   --border2: rgba(0, 0, 0, 0.12);
+  --dash: rgba(0, 0, 0, 0.17);
 
   --radius: 12px;
   --radius-sm: 8px;
+
+  /* Left padding the title bar owes the native window buttons. macOS floats
+     its traffic lights over our chrome (titleBarStyle: Overlay); every other
+     platform puts its buttons on the right, so the strip starts at the margin. */
+  --traffic-inset: 16px;
+
+  /* The two elevations the desktop mockup uses, and nothing else. */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-lift: 0 12px 26px -12px rgba(0, 0, 0, 0.22);
 
   color-scheme: light;
 }
@@ -76,6 +99,7 @@
     --ink3: #b2ab9d;
     --muted: #918a7d;
     --faint: #6f6a5e;
+    --idle: #4d483f;
 
     --accent: #5b8dff;
     --accent-h: #7aa2ff;
@@ -86,11 +110,16 @@
     --green-tint: #16281e;
     --gold: #d9a648;
     --gold-tint: #2c2513;
-    --danger: #e26a5c;
+    --gold-bd: #4b3d22;
+    --danger: #f26a5a;
     --danger-tint: #2e1a17;
 
-    --strict: #a98cf0;
-    --strict-tint: #241a3a;
+    --strict: #ab89f2;
+    --strict-tint: #241a39;
+    --strict-bd: #3d2d62;
+
+    --chip-ink-bg: #f2ede3;
+    --chip-ink-fg: #1a1a1a;
 
     --vis-private: #b2ab9d;
     --vis-private-tint: #312d26;
@@ -102,8 +131,10 @@
     --vis-public-tint: #16281e;
 
     --chip: #312d26;
+    --divider: rgba(255, 255, 255, 0.08);
     --border: rgba(255, 255, 255, 0.11);
     --border2: rgba(255, 255, 255, 0.15);
+    --dash: rgba(255, 255, 255, 0.2);
 
     color-scheme: dark;
   }
@@ -119,6 +150,7 @@
   --ink3: #b2ab9d;
   --muted: #918a7d;
   --faint: #6f6a5e;
+  --idle: #4d483f;
 
   --accent: #5b8dff;
   --accent-h: #7aa2ff;
@@ -129,11 +161,16 @@
   --green-tint: #16281e;
   --gold: #d9a648;
   --gold-tint: #2c2513;
-  --danger: #e26a5c;
+  --gold-bd: #4b3d22;
+  --danger: #f26a5a;
   --danger-tint: #2e1a17;
 
-  --strict: #a98cf0;
-  --strict-tint: #241a3a;
+  --strict: #ab89f2;
+  --strict-tint: #241a39;
+  --strict-bd: #3d2d62;
+
+  --chip-ink-bg: #f2ede3;
+  --chip-ink-fg: #1a1a1a;
 
   --vis-private: #b2ab9d;
   --vis-private-tint: #312d26;
@@ -145,10 +182,16 @@
   --vis-public-tint: #16281e;
 
   --chip: #312d26;
+  --divider: rgba(255, 255, 255, 0.08);
   --border: rgba(255, 255, 255, 0.11);
   --border2: rgba(255, 255, 255, 0.15);
+  --dash: rgba(255, 255, 255, 0.2);
 
   color-scheme: dark;
+}
+
+:root[data-platform="macos"] {
+  --traffic-inset: 78px;
 }
 
 * {
@@ -167,4 +210,70 @@ body {
   color: var(--ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-h);
+}
+
+/*
+ * Scrolling regions. The mockups draw a thin inset thumb rather than the
+ * platform default, which is too heavy against the warm surfaces. Applied by
+ * class so a region opts in - a scrollbar on the whole window is not wanted.
+ */
+.kt-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.kt-scroll::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+/* The three motions the design uses. Anything else is not in the design. */
+@keyframes kt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A radar ping under a live indicator: something is being viewed right now. */
+@keyframes kt-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes kt-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

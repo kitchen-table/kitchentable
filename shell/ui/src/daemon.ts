@@ -83,3 +83,13 @@ export function useStatus(enabled: boolean) {
 export function restartDaemon(): Promise<void> {
   return invoke("kt_restart_daemon");
 }
+
+/**
+ * Quit the whole product, daemon included.
+ *
+ * Distinct from closing the window, which only hides it. This is the one place
+ * in the UI that stops serving, so it is deliberately not on a toolbar.
+ */
+export function quit(): Promise<void> {
+  return invoke("kt_quit");
+}
