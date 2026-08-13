@@ -7,7 +7,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use kt_tunnel_proto::{
-    codec, Accepted, CloseReason, ControlFrame, HelloResponse, InstallIdentity, Retry, ServerHello,
+    codec, Accepted, CloseReason, HelloResponse, InstallIdentity, Retry, ServerHello,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -147,16 +147,4 @@ fn closed(reason: Option<String>) -> Ended {
         },
         _ => Ended::Transport("the relay closed the connection".into()),
     }
-}
-
-/// Say goodbye, so the other end knows this was deliberate.
-///
-/// Best effort by design: the common way a connection ends is a lid closing,
-/// and nothing here is worth delaying a shutdown for.
-pub async fn goodbye(socket: &mut Socket, reason: CloseReason) {
-    let frame = ControlFrame::Goodbye { reason };
-    if let Ok(bytes) = codec::encode(&frame) {
-        let _ = socket.send(Message::Binary(bytes.into())).await;
-    }
-    let _ = socket.close(None).await;
 }
