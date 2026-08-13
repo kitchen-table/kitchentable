@@ -78,35 +78,103 @@ pub async fn serve(listener: UnixListener, ctx: Arc<Context>) {
     }
 }
 
+/// The method that turns a connection into a subscriber.
+///
+/// Opt-in rather than automatic: the CLI makes one call and leaves, and pushing
+/// events at it would put unasked-for lines between its request and its answer.
+const SUBSCRIBE: &str = "event.subscribe";
+
 async fn handle_client(stream: UnixStream, ctx: Arc<Context>) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
+    let mut events: Option<tokio::sync::broadcast::Receiver<kt_types::Event>> = None;
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
+    loop {
+        tokio::select! {
+            // Biased so a request is always handled before a queued event.
+            // Answers are what a caller is blocking on; events can wait a turn.
+            biased;
 
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                // A notification expects no reply.
-                if request.id.is_none() {
-                    rpc::dispatch(&ctx, &request);
+            line = lines.next_line() => {
+                let Some(line) = line? else { return Ok(()) };
+                if line.trim().is_empty() {
                     continue;
                 }
-                rpc::respond(&ctx, &request)
+
+                let response = match serde_json::from_str::<Request>(&line) {
+                    Ok(request) => {
+                        if request.method == SUBSCRIBE && events.is_none() {
+                            events = Some(ctx.events.subscribe());
+                        }
+                        // A notification expects no reply.
+                        if request.id.is_none() {
+                            rpc::dispatch(&ctx, &request);
+                            continue;
+                        }
+                        rpc::respond(&ctx, &request)
+                    }
+                    Err(e) => parse_error(&e),
+                };
+
+                let mut bytes = serde_json::to_vec(&response).unwrap_or_else(|_| {
+                    br#"{"jsonrpc":"2.0","id":null,"error":{"code":"internal","message":"unserialisable response"}}"#.to_vec()
+                });
+                bytes.push(b'\n');
+                write.write_all(&bytes).await?;
             }
-            Err(e) => parse_error(&e),
-        };
 
-        let mut bytes = serde_json::to_vec(&response).unwrap_or_else(|_| {
-            br#"{"jsonrpc":"2.0","id":null,"error":{"code":"internal","message":"unserialisable response"}}"#.to_vec()
-        });
-        bytes.push(b'\n');
-        write.write_all(&bytes).await?;
+            event = next_event(&mut events) => {
+                let mut bytes = match serde_json::to_vec(&notification(event)) {
+                    Ok(bytes) => bytes,
+                    // Skip rather than drop the connection: a client that cannot
+                    // be told about one app is still owed the rest of them.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not serialise an event");
+                        continue;
+                    }
+                };
+                bytes.push(b'\n');
+                write.write_all(&bytes).await?;
+            }
+        }
     }
+}
 
-    Ok(())
+/// The next event for a subscriber, or never for a connection that has not
+/// asked for any.
+///
+/// Lagging is survivable and is not a disconnection: the client has missed
+/// some events, so it is told to resynchronise rather than left believing its
+/// picture is current.
+async fn next_event(
+    events: &mut Option<tokio::sync::broadcast::Receiver<kt_types::Event>>,
+) -> kt_types::Event {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let Some(rx) = events.as_mut() else {
+        return std::future::pending().await;
+    };
+
+    match rx.recv().await {
+        Ok(event) => event,
+        Err(RecvError::Lagged(missed)) => {
+            tracing::warn!(missed, "a subscriber fell behind");
+            kt_types::Event::Error {
+                message: format!("{missed} events were missed; the window may be out of date"),
+            }
+        }
+        // The daemon is shutting down; nothing more will arrive.
+        Err(RecvError::Closed) => std::future::pending().await,
+    }
+}
+
+/// An event as a JSON-RPC notification: no id, so no reply is expected.
+fn notification(event: kt_types::Event) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": event,
+    })
 }
 
 fn parse_error(e: &serde_json::Error) -> Response {
@@ -163,6 +231,8 @@ mod tests {
             serving: ServingState::Serving,
             started: Instant::now(),
             // Nothing to rescan: these tests drive the library directly.
+            events: crate::rpc::Events::new(),
+            presence: std::sync::Arc::new(kt_server::Presence::new()),
             rescan: std::sync::Arc::new(|| {}),
         })
     }

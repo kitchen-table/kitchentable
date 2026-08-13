@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager, State,
+    Emitter, Manager, State,
 };
 
 mod daemon;
@@ -95,6 +95,44 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
+/// How long to wait before trying the event stream again.
+///
+/// The daemon going away is ordinary - an update restarts it - so this is a
+/// retry interval rather than an error path. Short enough that the window is
+/// not stale for long, long enough that a daemon which refuses to start does
+/// not turn into a busy loop.
+const RESUBSCRIBE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pump daemon events into the window, forever.
+///
+/// The Rust side stays a dumb proxy here too: it does not read the events, it
+/// re-emits them under one name and lets the UI decide what any of it means.
+///
+/// Reconnecting is the interesting part. A daemon that restarts has a new
+/// library, new devices and possibly new URLs, and the window has been looking
+/// at the old ones - so reconnecting emits a resync rather than quietly
+/// resuming, and the UI refetches instead of trusting what it already has.
+fn forward_events(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let socket = socket::socket_path();
+        loop {
+            let emitter = app.clone();
+            match socket::subscribe(&socket, move |event| {
+                if let Err(e) = emitter.emit("kt://event", event) {
+                    tracing::debug!(error = %e, "could not emit an event");
+                }
+            }) {
+                Ok(()) => tracing::debug!("the daemon closed the event stream"),
+                Err(e) => tracing::debug!(error = %e, "could not subscribe"),
+            }
+
+            std::thread::sleep(RESUBSCRIBE_AFTER);
+            // Whatever happened while we were not listening, we missed.
+            let _ = app.emit("kt://resync", ());
+        }
+    });
+}
+
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Kitchen Table", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Kitchen Table", true, Some("CmdOrCtrl+Q"))?;
@@ -171,6 +209,8 @@ pub fn run() {
                 Ok(started) => tracing::info!(started, "daemon ready"),
                 Err(e) => tracing::error!(error = %e, "could not start the daemon"),
             });
+
+            forward_events(app.handle().clone());
 
             tracing::info!("shell started");
             Ok(())

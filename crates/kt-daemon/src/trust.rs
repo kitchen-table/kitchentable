@@ -9,6 +9,7 @@ use axum::http::{header, HeaderMap};
 use kt_auth::{Device, DeviceId, DeviceStatus, InviteToken, SessionKeys};
 use kt_server::{Redemption, TrustSource};
 use kt_store::{AccessEvent, Store};
+use kt_types::Event;
 
 pub struct Trust {
     store: Arc<Store>,
@@ -16,6 +17,9 @@ pub struct Trust {
     /// Asks the network what a device calls itself. Used once per device, off
     /// the request path, purely to suggest a better name than the user agent.
     discoverer: Arc<dyn kt_mdns::Discoverer>,
+    /// Where pairing requests and access go, so the window does not have to
+    /// poll for either.
+    events: crate::rpc::Events,
     /// Whether this machine is on a network the owner marked as home.
     ///
     /// Fixed for now. Remembering networks by gateway fingerprint is the next
@@ -26,10 +30,11 @@ pub struct Trust {
 }
 
 impl Trust {
-    pub fn new(store: Arc<Store>, keys: Arc<SessionKeys>) -> Self {
+    pub fn new(store: Arc<Store>, keys: Arc<SessionKeys>, events: crate::rpc::Events) -> Self {
         Self::with_discoverer(
             store,
             keys,
+            events,
             Arc::from(kt_mdns::discoverer_for_this_platform()),
         )
     }
@@ -37,11 +42,13 @@ impl Trust {
     pub fn with_discoverer(
         store: Arc<Store>,
         keys: Arc<SessionKeys>,
+        events: crate::rpc::Events,
         discoverer: Arc<dyn kt_mdns::Discoverer>,
     ) -> Self {
         Self {
             store,
             keys,
+            events,
             discoverer,
             household: true,
         }
@@ -108,6 +115,12 @@ impl Trust {
         if let Err(e) = self.store.upsert_device(&device) {
             tracing::warn!(error = %e, "could not record a new device");
         }
+        // Somebody is holding a phone waiting for this. The window polled for
+        // it every two seconds before events existed, which is up to two
+        // seconds of someone staring at a wait page for no reason.
+        self.events.send(Event::PairingRequest {
+            device_id: device.id.as_str().to_string(),
+        });
         let cookie = kt_server::gate::session_cookie(&self.keys.mint(&device.id, now), false);
         (device, Some(cookie))
     }
@@ -209,6 +222,17 @@ impl TrustSource for Trust {
         if let Err(e) = self.store.log_access(&event) {
             tracing::warn!(error = %e, "could not write to the access log");
         }
+        self.events.send(Event::Access {
+            app_slug: Some(slug.to_string()),
+            action: action.to_string(),
+        });
+    }
+
+    fn presence_changed(&self, slug: &str, viewers: Vec<kt_types::Viewer>) {
+        self.events.send(Event::Presence {
+            app_slug: slug.to_string(),
+            viewers,
+        });
     }
 }
 
@@ -221,6 +245,7 @@ mod tests {
         Trust::new(
             Arc::new(Store::in_memory().expect("opens")),
             Arc::new(SessionKeys::generate()),
+            crate::rpc::Events::new(),
         )
     }
 

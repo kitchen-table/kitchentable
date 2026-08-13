@@ -88,6 +88,52 @@ pub fn call(socket: &Path, method: &str, params: Option<Value>) -> Result<Value,
     Ok(value.get("result").cloned().unwrap_or(Value::Null))
 }
 
+/// Subscribe, and hand every event to `on_event` until the connection drops.
+///
+/// Its own connection, held open, with no read timeout: quiet is the normal
+/// state of an event stream, and the five second timeout that keeps a request
+/// honest would tear this down every five seconds instead.
+///
+/// Returns when the daemon goes away, so the caller can decide whether to wait
+/// and reconnect. It does not retry by itself - a restarted daemon is also a
+/// daemon whose library the window needs to reload, and only the caller knows
+/// how to say so.
+pub fn subscribe(socket: &Path, mut on_event: impl FnMut(Value)) -> Result<(), SocketError> {
+    let stream = UnixStream::connect(socket).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            SocketError::NotRunning
+        }
+        _ => SocketError::Io(e),
+    })?;
+    stream.set_write_timeout(Some(TIMEOUT))?;
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        "method": "event.subscribe",
+        "params": Value::Null,
+    });
+    let mut writer = &stream;
+    let mut line = serde_json::to_vec(&request)?;
+    line.push(b'\n');
+    writer.write_all(&line)?;
+    writer.flush()?;
+
+    for line in BufReader::new(&stream).lines() {
+        let line = line?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        // The acknowledgement carries a result; events carry params. Anything
+        // else on this connection is not ours to interpret.
+        if let Some(params) = value.get("params") {
+            on_event(params.clone());
+        }
+    }
+
+    Ok(())
+}
+
 /// Whether a daemon is listening and speaking a protocol we understand.
 ///
 /// A mismatched major means the app was updated but the old daemon is still

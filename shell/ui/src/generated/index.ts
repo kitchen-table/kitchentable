@@ -8,4 +8,5 @@ export type { Event } from "./Event";
 export type { KtError } from "./KtError";
 export type { ServingState } from "./ServingState";
 export type { SysStatus } from "./SysStatus";
+export type { Viewer } from "./Viewer";
 export type { Visibility } from "./Visibility";

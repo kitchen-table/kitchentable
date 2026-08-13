@@ -78,8 +78,8 @@ impl Store {
         let m = &record.manifest;
         let extra = serde_json::Value::Object(m.extra.clone()).to_string();
         self.lock().execute(
-            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(slug) DO UPDATE SET
                 name = excluded.name,
                 icon = excluded.icon,
@@ -88,6 +88,7 @@ impl Store {
                 version = excluded.version,
                 path = excluded.path,
                 extra = excluded.extra,
+                paused = excluded.paused,
                 updated_at = strftime('%s','now')",
             params![
                 m.slug,
@@ -98,9 +99,43 @@ impl Store {
                 m.version,
                 record.path,
                 extra,
+                m.paused as i64,
             ],
         )?;
         Ok(())
+    }
+
+    /// Stop treating a folder as an app, without touching the folder.
+    ///
+    /// Recorded here rather than in the folder because the promise the window
+    /// makes is that your files are left alone - and because a scan has to be
+    /// able to skip it before anything in it has been read.
+    pub fn forget_path(&self, path: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO forgotten (path) VALUES (?1) ON CONFLICT(path) DO NOTHING",
+            params![path],
+        )?;
+        Ok(())
+    }
+
+    /// Take a folder off the forgotten list, so the next scan picks it up.
+    pub fn remember_path(&self, path: &str) -> Result<bool, StoreError> {
+        let n = self
+            .lock()
+            .execute("DELETE FROM forgotten WHERE path = ?1", params![path])?;
+        Ok(n > 0)
+    }
+
+    /// Every folder the owner told Kitchen Table to forget.
+    pub fn forgotten_paths(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path FROM forgotten")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Returns whether a row was actually removed.
@@ -115,7 +150,7 @@ impl Store {
     pub fn list_apps(&self) -> Result<Vec<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused
              FROM apps ORDER BY name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_record(row)))?;
@@ -129,7 +164,7 @@ impl Store {
     pub fn get_app(&self, slug: &str) -> Result<Option<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused
              FROM apps WHERE slug = ?1",
         )?;
         let found = stmt
@@ -185,6 +220,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             entry: row.get(3)?,
             visibility: visibility_from_str(&row.get::<_, String>(4)?),
             version: row.get(5)?,
+            // Column 8. Index 7 is `extra`, and reading that as an
+            // integer would quietly make every app look unpaused.
+            paused: row.get::<_, i64>(8)? != 0,
             extra,
         },
         row.get(6)?,
@@ -224,6 +262,7 @@ mod tests {
                 entry: "index.html".into(),
                 visibility: Visibility::Private,
                 version: 1,
+                paused: false,
                 extra: serde_json::Map::new(),
             },
             format!("/tmp/ws/{slug}"),

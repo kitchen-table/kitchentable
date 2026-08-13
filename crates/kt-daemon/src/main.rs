@@ -11,7 +11,7 @@ use std::time::Instant;
 use kt_registry::Registry;
 use kt_server::AppSource;
 use kt_store::Store;
-use kt_types::{paths, DegradedReason, ServingState, Urls};
+use kt_types::{paths, AppRecord, DegradedReason, Event, ServingState, Urls};
 
 mod authoring;
 mod keys;
@@ -93,6 +93,12 @@ async fn run() -> Result<(), StartupError> {
 
     let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
     let library = Arc::new(Library::new());
+    // Created before anything that publishes, so the watcher, the gate and the
+    // pairing path all share one bus.
+    let events = rpc::Events::new();
+    // Who currently has an app open. Shared with the HTTP server, which hears
+    // the check-ins, and with the socket, which reports them.
+    let presence = Arc::new(kt_server::Presence::new());
 
     // The session key outlives the process, so a restart is invisible to
     // everyone who has already paired. Tests set KT_NO_KEYCHAIN: the e2e suite
@@ -104,7 +110,7 @@ async fn run() -> Result<(), StartupError> {
         Arc::from(kt_certs::for_this_platform(&paths::state_dir(&home)))
     };
     let keys = keys::load_or_create(secrets);
-    let trust = Arc::new(trust::Trust::new(Arc::clone(&store), keys));
+    let trust = Arc::new(trust::Trust::new(Arc::clone(&store), keys, events.clone()));
 
     let (listener, port, port_degraded) = bind_http().await?;
 
@@ -140,7 +146,9 @@ async fn run() -> Result<(), StartupError> {
         ),
     };
 
-    announce_all(&registry, &store, &library, announcer.as_ref(), addr);
+    // No publish on the first scan: nobody can have subscribed yet, and every
+    // app would look like a change.
+    announce_all(&registry, &store, &library, announcer.as_ref(), addr, None);
 
     let serving = match (port_degraded, mdns_live) {
         (Some(reason), _) => ServingState::Degraded {
@@ -174,8 +182,21 @@ async fn run() -> Result<(), StartupError> {
         } else {
             Arc::from(kt_mdns::for_this_platform())
         };
-        Arc::new(move || announce_all(&registry, &store, &library, &*announcer, addr))
+        let events = events.clone();
+        let urls = urls.clone();
+        Arc::new(move || {
+            announce_all(
+                &registry,
+                &store,
+                &library,
+                &*announcer,
+                addr,
+                Some((&events, &urls)),
+            )
+        })
     };
+
+    let presence_for_http = Arc::clone(&presence);
 
     let ctx = Arc::new(rpc::Context {
         library: Arc::clone(&library),
@@ -185,7 +206,34 @@ async fn run() -> Result<(), StartupError> {
         serving,
         started: Instant::now(),
         rescan: Arc::clone(&rescan),
+        events: events.clone(),
+        presence: Arc::clone(&presence),
     });
+
+    // Nobody tells us when a page stops checking in - that is the whole point
+    // of a timeout - so someone has to look. Sweeping on a timer, rather than
+    // only when the window asks, means the owner sees a tab close whether or
+    // not they happen to be looking at that app.
+    {
+        let events = events.clone();
+        let presence = Arc::clone(&presence);
+        let library = Arc::clone(&library);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(kt_server::presence::LINGER / 4);
+            loop {
+                tick.tick().await;
+                if presence.sweep() {
+                    for record in library.records() {
+                        let slug = record.manifest.slug;
+                        events.send(Event::Presence {
+                            viewers: presence.viewers(&slug),
+                            app_slug: slug,
+                        });
+                    }
+                }
+            }
+        });
+    }
 
     // Rescan whenever the workspace settles. The watcher must outlive this
     // scope or the watch stops, hence the binding.
@@ -201,7 +249,7 @@ async fn run() -> Result<(), StartupError> {
     );
 
     let http = tokio::spawn(async move {
-        let app = kt_server::router(library, trust);
+        let app = kt_server::router(library, trust, presence_for_http);
         // with_connect_info, or the peer address never reaches the gate and
         // the owner's own browser would be asked to pair with itself.
         let service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
@@ -227,8 +275,9 @@ fn announce_all(
     library: &Library,
     announcer: &dyn kt_mdns::Announcer,
     addr: Option<std::net::Ipv4Addr>,
+    publish: Option<(&rpc::Events, &Urls)>,
 ) {
-    sync_with(registry, store, library, Some(announcer), addr)
+    sync_with(registry, store, library, Some(announcer), addr, publish)
 }
 
 /// Rescan the workspace and make the store and the live library agree.
@@ -241,6 +290,7 @@ fn sync_with(
     library: &Library,
     announcer: Option<&dyn kt_mdns::Announcer>,
     addr: Option<std::net::Ipv4Addr>,
+    publish: Option<(&rpc::Events, &Urls)>,
 ) {
     let records = match registry.scan() {
         Ok(records) => records,
@@ -249,6 +299,19 @@ fn sync_with(
             return;
         }
     };
+
+    // Folders the owner told us to forget. Dropped here rather than in the
+    // registry because the registry's job is to report what is on disk, and
+    // this is a decision about what Kitchen Table does with it. The folder is
+    // still there, untouched, which is what the window promised.
+    let forgotten = store.forgotten_paths().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not read the forgotten list");
+        Vec::new()
+    });
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|record| !forgotten.contains(&record.path))
+        .collect();
 
     let slugs: Vec<String> = records.iter().map(|r| r.manifest.slug.clone()).collect();
 
@@ -263,12 +326,59 @@ fn sync_with(
         Err(e) => tracing::warn!(error = %e, "could not prune removed apps"),
     }
 
+    // What the library held before the swap, so the events describe changes
+    // rather than restating the whole workspace on every scan. A watcher that
+    // fires on any write would otherwise have the window refetching everything
+    // because one file's timestamp moved.
+    let was: std::collections::HashMap<String, AppFingerprint> = library
+        .records()
+        .iter()
+        .map(|record| (record.manifest.slug.clone(), fingerprint(record)))
+        .collect();
+
     let before = library.list().len();
     library.replace_announcing(records, announcer, addr);
     let after = library.len();
     if before != after {
         tracing::info!(apps = after, "library updated");
     }
+
+    let Some((events, urls)) = publish else {
+        return;
+    };
+
+    let mut still_here = std::collections::HashSet::new();
+    for record in library.records() {
+        let slug = record.manifest.slug.clone();
+        still_here.insert(slug.clone());
+        if was.get(&slug) != Some(&fingerprint(&record)) {
+            let app_urls = rpc::urls_for(urls, library, &slug);
+            events.send(Event::AppChanged {
+                app: record.to_app(&app_urls),
+            });
+        }
+    }
+    for slug in was.into_keys() {
+        if !still_here.contains(&slug) {
+            events.send(Event::AppRemoved { slug });
+        }
+    }
+}
+
+/// Enough of an app to tell "nothing moved" from "something the window should
+/// redraw". Deliberately not the whole record: the mtime of a file nobody
+/// serves is not a change anyone needs to hear about.
+type AppFingerprint = (u32, kt_types::Visibility, u64, Option<u64>, bool, String);
+
+fn fingerprint(record: &AppRecord) -> AppFingerprint {
+    (
+        record.manifest.version,
+        record.manifest.visibility,
+        record.size_bytes,
+        record.deployed_at,
+        record.entry_exists,
+        record.manifest.name.clone(),
+    )
 }
 
 /// An origin with the port left off when it is the default, because a URL

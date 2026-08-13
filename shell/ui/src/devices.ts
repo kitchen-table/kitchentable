@@ -21,8 +21,15 @@ export interface Device {
   last_seen: number;
 }
 
-/** How quickly a waiting phone gets an answer, if nobody is watching events. */
-const POLL_MS = 2000;
+/**
+ * How quickly a waiting phone gets an answer, if nobody is watching events.
+ *
+ * `event.pairing_request` is what makes the prompt appear now, and it arrives
+ * the moment the device is recorded rather than up to two seconds later. This
+ * is the fallback for a window that has lost its subscription and not yet got
+ * it back.
+ */
+const POLL_MS = 30_000;
 
 export function useDevices(enabled = true) {
   return useQuery({

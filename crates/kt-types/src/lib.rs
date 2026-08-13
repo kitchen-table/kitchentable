@@ -27,6 +27,6 @@ pub mod protocol;
 pub mod status;
 
 pub use app::{App, AppManifest, AppRecord, Urls, Visibility};
-pub use event::Event;
+pub use event::{Event, Viewer};
 pub use protocol::{ErrorCode, KtError, Request, Response, PROTOCOL_VERSION};
 pub use status::{DegradedReason, ServingState, SysStatus};

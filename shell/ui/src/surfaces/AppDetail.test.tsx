@@ -16,6 +16,7 @@ function app(over: Partial<App> = {}): App {
     entry: "index.html",
     visibility: "invited",
     version: 3,
+    paused: false,
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
@@ -37,6 +38,20 @@ function show(over: Partial<App> = {}, tab: AppTab = "overview") {
     </QueryClientProvider>,
   );
   return { ...view, onTab, onNavigate };
+}
+
+/**
+ * Answer each socket method separately.
+ *
+ * The Overview asks three questions at once - the log, the devices to name it
+ * with, and the invites - so a single blanket answer cannot say anything
+ * useful about any of them.
+ */
+function answers(byMethod: Record<string, unknown>) {
+  call.mockImplementation((_command, args) => {
+    const method = (args as { method: string }).method;
+    return Promise.resolve(byMethod[method] ?? []);
+  });
 }
 
 describe("AppDetail", () => {
@@ -95,6 +110,116 @@ describe("AppDetail", () => {
   it("reports bundle size in human units", () => {
     show({ size_bytes: 42_000 });
     expect(screen.getByText("41 KB")).toBeDefined();
+  });
+
+  it("names who has the app open, and the page they are on", async () => {
+    answers({
+      "presence.list": [
+        { device_id: "d1", path: "/budget", seconds_ago: 2 },
+        { device_id: "owner", path: "/", seconds_ago: 1 },
+      ],
+      "device.list": [{ id: "d1", name: "Kitchen iPad", status: "approved" }],
+    });
+
+    show();
+    await waitFor(() => expect(screen.getByText("Kitchen iPad")).toBeDefined());
+    expect(screen.getByText(/viewing budget/)).toBeDefined();
+    // The owner's own browser has no device record, so it is named for what
+    // it is rather than left as an unrecognised id.
+    expect(screen.getByText("This machine")).toBeDefined();
+    expect(screen.getByText(/viewing the app/)).toBeDefined();
+  });
+
+  it("counts the people reading it, once it has asked", async () => {
+    answers({ "presence.list": [{ device_id: "d1", path: "/", seconds_ago: 1 }] });
+
+    show();
+    await waitFor(() => expect(screen.getByText("online now")).toBeDefined());
+    await waitFor(() => expect(screen.getByText("1")).toBeDefined());
+  });
+
+  it("says nobody rather than pretending, when nobody has it open", async () => {
+    answers({ "presence.list": [] });
+
+    show();
+    await waitFor(() =>
+      expect(screen.getByText(/Nobody has this open right now/)).toBeDefined(),
+    );
+  });
+
+  it("puts Live now above the history, as the mockup does", () => {
+    // Who is reading it now is the question an owner asks first.
+    const { container } = show();
+    const text = container.textContent ?? "";
+
+    expect(text.indexOf("Live now")).toBeGreaterThan(-1);
+    expect(text.indexOf("Live now")).toBeLessThan(text.indexOf("Recent activity"));
+  });
+
+  it("names the version and says when it landed", () => {
+    // The mockup reads "v7 / deployed 12m ago". A bare "7" beside the word
+    // "changed" is neither the name nor the fact.
+    show({ version: 7, deployed_at: Math.floor(Date.now() / 1000) - 720 });
+
+    expect(screen.getByText("v7")).toBeDefined();
+    expect(screen.getByText(/deployed 12m ago/)).toBeDefined();
+  });
+
+  it("says who did each thing in the activity list, not just what happened", () => {
+    // The mockup writes whole sentences - "Priya's iPhone opened the app" -
+    // because a column of the bare word "Opened" answers the least
+    // interesting half of the question.
+    answers({
+      "log.query": [{ at: 1, actor: "viewer", action: "opened", device_id: "d1" }],
+      "device.list": [{ id: "d1", name: "Kitchen iPad", status: "approved" }],
+    });
+
+    show();
+    return waitFor(() =>
+      expect(screen.getByText(/Kitchen iPad opened the app/)).toBeDefined(),
+    );
+  });
+
+  it("falls back to the actor when the device is not one we know", () => {
+    answers({ "log.query": [{ at: 1, actor: "owner", action: "opened" }] });
+
+    show();
+    return waitFor(() => expect(screen.getByText(/You opened the app/)).toBeDefined());
+  });
+
+  it("has words for a request the gate turned away", async () => {
+    // `refused` is what kt-server writes on every blocked open - the most
+    // common negative event - and it had no entry at all, so it rendered as
+    // the raw lowercase word beside a meaningless dot.
+    answers({ "log.query": [{ at: 1, actor: "viewer", action: "refused" }] });
+
+    show();
+    await waitFor(() =>
+      expect(screen.getByText(/Someone was turned away/)).toBeDefined(),
+    );
+    expect(screen.queryByText(/^refused$/)).toBeNull();
+  });
+
+  it("offers the live invite link, which is the thing you hand over", async () => {
+    answers({
+      "share.list_invites": [
+        { token: "9fK2", url: "http://trip-planner.local/i/9fK2-mZq8vL", active: true },
+        { token: "old", url: "http://trip-planner.local/i/old", active: false },
+      ],
+    });
+
+    show();
+    await waitFor(() => expect(screen.getByText("Invite link · active")).toBeDefined());
+    expect(screen.getByText("trip-planner.local/i/9fK2-mZq8vL")).toBeDefined();
+    expect(screen.queryByText(/\/i\/old/)).toBeNull();
+  });
+
+  it("explains who can open the app when there is no link to show", async () => {
+    answers({ "share.list_invites": [] });
+
+    show();
+    await waitFor(() => expect(screen.getByText(/Invited ·/)).toBeDefined());
+    expect(screen.queryByText("Invite link · active")).toBeNull();
   });
 
   it("shows a dash for online now rather than a zero it cannot know", () => {

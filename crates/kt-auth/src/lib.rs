@@ -52,6 +52,8 @@ pub enum DenyReason {
     WrongNetwork,
     /// The device was explicitly revoked; a new invite is required.
     DeviceRevoked,
+    /// The owner took the app offline. Nothing to do with who is asking.
+    Paused,
 }
 
 /// Decide whether a request may open an app.
@@ -60,7 +62,19 @@ pub enum DenyReason {
 /// rules across middleware is how a level ends up meaning something subtly
 /// different on one code path than another. Its test matrix is the security
 /// test for the product.
-pub fn decide(visibility: Visibility, device: Option<&Device>, ctx: &RequestContext) -> Decision {
+pub fn decide(
+    visibility: Visibility,
+    paused: bool,
+    device: Option<&Device>,
+    ctx: &RequestContext,
+) -> Decision {
+    // A paused app answers nobody - not the owner, not an approved device, not
+    // this machine. It is the one refusal that says nothing about the caller,
+    // which is why it is checked before anything is known about them.
+    if paused {
+        return Decision::Deny(DenyReason::Paused);
+    }
+
     // A revoked device is refused everywhere, whatever the level says.
     // Revocation that any visibility level could override would not be
     // revocation.
@@ -131,6 +145,42 @@ mod matrix {
 
     fn device(status: DeviceStatus) -> Device {
         Device::new_for_test("d1", status)
+    }
+
+    /// Pausing beats everything the matrix says.
+    ///
+    /// Rather than doubling every row above, this runs the same table again
+    /// with the app paused and asserts the answer is always the same refusal.
+    /// That is the claim worth making: taking an app offline is not a level,
+    /// it is a switch, and no combination of visibility, device or network
+    /// gets round it - including the owner on this very machine.
+    #[test]
+    fn pausing_overrides_every_row_of_the_matrix() {
+        use Visibility::*;
+
+        for visibility in [Private, Network, Invited, Public] {
+            for status in [
+                None,
+                Some(DeviceStatus::Owner),
+                Some(DeviceStatus::Approved),
+                Some(DeviceStatus::Pending),
+                Some(DeviceStatus::Revoked),
+            ] {
+                for loopback in [true, false] {
+                    for household in [true, false] {
+                        let device = status.map(device);
+                        let got =
+                            decide(visibility, true, device.as_ref(), &ctx(loopback, household));
+                        assert_eq!(
+                            got,
+                            Decision::Deny(DenyReason::Paused),
+                            "{visibility:?}/{status:?}/loopback={loopback}/household={household} \
+                             should be refused while paused"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Every visibility level against every kind of caller.
@@ -212,7 +262,12 @@ mod matrix {
 
         for (visibility, status, loopback, household, expected) in cases {
             let device = status.map(device);
-            let got = decide(*visibility, device.as_ref(), &ctx(*loopback, *household));
+            let got = decide(
+                *visibility,
+                false,
+                device.as_ref(),
+                &ctx(*loopback, *household),
+            );
             assert_eq!(
                 got, *expected,
                 "{visibility:?} + {status:?} (loopback={loopback}, household={household})"
@@ -233,7 +288,7 @@ mod matrix {
         ] {
             let revoked = device(DeviceStatus::Revoked);
             assert_eq!(
-                decide(visibility, Some(&revoked), &ctx(false, true)),
+                decide(visibility, false, Some(&revoked), &ctx(false, true)),
                 Decision::Deny(DenyReason::DeviceRevoked),
                 "{visibility:?} let a revoked device through"
             );
@@ -246,7 +301,7 @@ mod matrix {
         // everyone but the owner. This is the property that makes dropping a
         // folder into the workspace safe.
         assert_eq!(
-            decide(Visibility::default(), None, &ctx(false, true)),
+            decide(Visibility::default(), false, None, &ctx(false, true)),
             Decision::Deny(DenyReason::NotTheOwner)
         );
     }

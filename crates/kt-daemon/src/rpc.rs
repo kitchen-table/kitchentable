@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use kt_types::{
     protocol::{ResponsePayload, PROTOCOL_VERSION},
-    ErrorCode, KtError, Request, Response, ServingState, SysStatus, Urls,
+    ErrorCode, Event, KtError, Request, Response, ServingState, SysStatus, Urls,
 };
 
 use kt_auth::{DeviceId, DeviceStatus, Invite, InvitePolicy, InviteToken};
@@ -31,6 +31,49 @@ pub struct Context {
     /// debounce is measured in the time it takes someone to finish copying a
     /// folder - far too long to block a socket call on.
     pub rescan: Rescan,
+    /// Events for whoever has subscribed (docs/architecture.md section 4).
+    pub events: Events,
+    /// Who currently has each app open, as the HTTP server hears it.
+    pub presence: Arc<kt_server::Presence>,
+}
+
+/// The daemon's event bus.
+///
+/// A broadcast channel rather than a list of connections: publishers are all
+/// over the daemon - the watcher, the gate, the pairing path - and none of them
+/// should have to know whether anybody is listening. Sending to nobody is not
+/// an error.
+#[derive(Clone)]
+pub struct Events(tokio::sync::broadcast::Sender<Event>);
+
+/// How many events a slow client may fall behind before it starts losing them.
+///
+/// Generous, because the cost of a miss is a stale window rather than a dropped
+/// request, and because bursts are real: dropping a folder of twenty apps in
+/// emits twenty `app_changed` in one scan.
+const EVENT_BACKLOG: usize = 256;
+
+impl Default for Events {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Events {
+    pub fn new() -> Self {
+        Self(tokio::sync::broadcast::channel(EVENT_BACKLOG).0)
+    }
+
+    /// Publish to every subscriber. Deliberately infallible: an event nobody
+    /// is listening for is the normal case, not a failure worth propagating
+    /// back into the code that caused it.
+    pub fn send(&self, event: Event) {
+        let _ = self.0.send(event);
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Event> {
+        self.0.subscribe()
+    }
 }
 
 /// Boxed so the daemon can hand in the real rescan closure and tests a no-op,
@@ -40,10 +83,18 @@ pub type Rescan = Arc<dyn Fn() + Send + Sync>;
 impl Context {
     /// URLs for one app, with its announced hostname filled in.
     fn urls_for(&self, slug: &str) -> Urls {
-        Urls {
-            hostname: self.library.hostname(slug),
-            ..self.urls.clone()
-        }
+        urls_for(&self.urls, &self.library, slug)
+    }
+}
+
+/// URLs for one app, with the hostname the library actually announced.
+///
+/// Free rather than a method because the watcher builds app views too, and it
+/// has a library and a `Urls` but no [`Context`].
+pub fn urls_for(urls: &Urls, library: &Library, slug: &str) -> Urls {
+    Urls {
+        hostname: library.hostname(slug),
+        ..urls.clone()
     }
 }
 
@@ -90,6 +141,44 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             )
             .map_err(author_error)?;
             created(ctx, &folder)
+        }
+
+        // ---- the danger zone ------------------------------------------
+        //
+        // Pausing and forgetting are the two ways to stop serving something.
+        // They are deliberately different: one is reversible from the window
+        // and keeps every link and device, the other takes the app out of the
+        // library and leaves the folder exactly where it was.
+        "app.pause" | "app.resume" => {
+            let slug = string_param(request, "slug")?;
+            let paused = request.method == "app.pause";
+            let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+
+            write_paused(&record.path, paused).map_err(|e| KtError {
+                code: ErrorCode::Io,
+                message: format!("could not update the manifest: {e}"),
+                detail: None,
+            })?;
+            // Rescan rather than waiting out the watcher: an owner who pauses
+            // an app expects it to stop answering now, not once a debounce
+            // tuned for folder copies has elapsed.
+            (ctx.rescan)();
+
+            log_owner_action(ctx, &slug, if paused { "paused" } else { "resumed" });
+            json(&serde_json::json!({ "slug": slug, "paused": paused }))
+        }
+
+        "app.forget" => {
+            let slug = string_param(request, "slug")?;
+            let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+
+            // The folder is not touched. Kitchen Table stops looking at it,
+            // which is exactly what the window says this does.
+            ctx.store.forget_path(&record.path).map_err(store_error)?;
+            (ctx.rescan)();
+
+            log_owner_action(ctx, &slug, "forgotten");
+            json(&serde_json::json!({ "slug": slug, "path": record.path }))
         }
 
         // ---- sharing --------------------------------------------------
@@ -229,6 +318,18 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             uptime_secs: ctx.started.elapsed().as_secs() as u32,
         }),
 
+        // The socket layer notices this method and starts forwarding events on
+        // the connection; the answer here is only the acknowledgement, so a
+        // caller knows subscribing worked rather than inferring it from silence.
+        "event.subscribe" => json(&serde_json::json!({ "subscribed": true })),
+
+        // Who has an app open right now. The events keep this current, so this
+        // exists for the first paint and for anything that missed one.
+        "presence.list" => {
+            let slug = string_param(request, "slug")?;
+            json(&ctx.presence.viewers(&slug))
+        }
+
         other => Err(KtError {
             code: ErrorCode::BadRequest,
             message: format!("unknown method {other:?}"),
@@ -328,6 +429,30 @@ fn parse_visibility(raw: &str) -> Result<kt_types::Visibility, KtError> {
 
 /// Rewrite `visibility` in an app's manifest, leaving everything else - unknown
 /// keys included - exactly as it was.
+/// Set or clear `paused` in an app's manifest.
+///
+/// The manifest on disk is the source of truth, exactly as it is for
+/// visibility: writing only to the database would make the two disagree the
+/// moment anyone edited app.json by hand.
+fn write_paused(path: &str, paused: bool) -> std::io::Result<()> {
+    let manifest_path = std::path::Path::new(path).join("app.json");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    if paused {
+        manifest["paused"] = serde_json::json!(true);
+    } else if let Some(object) = manifest.as_object_mut() {
+        // Removed rather than set to false, so a manifest someone reads by
+        // hand does not carry a line about a state the app is not in.
+        object.remove("paused");
+    }
+
+    let pretty = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&manifest_path, format!("{pretty}\n"))
+}
+
 fn write_visibility(path: &str, visibility: kt_types::Visibility) -> std::io::Result<()> {
     let manifest_path = std::path::Path::new(path).join("app.json");
     let raw = std::fs::read_to_string(&manifest_path)?;
@@ -367,6 +492,29 @@ fn invite_view(ctx: &Context, invite: &Invite) -> serde_json::Value {
         "revoked": invite.revoked_at.is_some(),
         "active": invite.is_active(now()),
     })
+}
+
+/// Record something the owner did to an app, and tell the window.
+///
+/// Taking an app offline or out of the library is exactly the kind of thing
+/// somebody asks "when did that happen?" about later, so it goes in the same
+/// log as every other access decision rather than only into the daemon's
+/// output.
+fn log_owner_action(ctx: &Context, slug: &str, action: &str) {
+    if let Err(e) = ctx.store.log_access(&kt_store::AccessEvent {
+        at: now(),
+        app_slug: Some(slug.to_string()),
+        device_id: None,
+        actor: "owner".to_string(),
+        action: action.to_string(),
+        detail: None,
+    }) {
+        tracing::warn!(error = %e, "could not write to the access log");
+    }
+    ctx.events.send(Event::Access {
+        app_slug: Some(slug.to_string()),
+        action: action.to_string(),
+    });
 }
 
 fn device_param(request: &Request) -> Result<DeviceId, KtError> {
@@ -484,6 +632,7 @@ mod tests {
                 entry: "index.html".into(),
                 visibility: Visibility::Private,
                 version: 3,
+                paused: false,
                 extra: serde_json::Map::new(),
             },
             dir.clone(),
@@ -504,6 +653,8 @@ mod tests {
             started: Instant::now(),
             // Nothing to rescan: these tests drive the library directly.
             rescan: std::sync::Arc::new(|| {}),
+            events: Events::new(),
+            presence: std::sync::Arc::new(kt_server::Presence::new()),
         }
     }
 

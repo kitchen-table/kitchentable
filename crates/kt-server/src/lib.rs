@@ -19,8 +19,12 @@ use axum::{
 };
 
 pub mod gate;
+pub mod live;
 pub mod pages;
 pub mod paths;
+pub mod presence;
+
+pub use presence::Presence;
 
 /// What the server needs to know to serve one app.
 #[derive(Debug, Clone)]
@@ -31,6 +35,8 @@ pub struct ServedApp {
     pub root: PathBuf,
     pub entry: String,
     pub visibility: kt_types::Visibility,
+    /// Taken offline by the owner. Refused for everyone, including them.
+    pub paused: bool,
 }
 
 /// Snapshot of what is currently servable. Swapped wholesale when the registry
@@ -84,6 +90,13 @@ pub trait TrustSource: Send + Sync + 'static {
 
     /// Record an access-log line.
     fn log(&self, slug: &str, device: Option<&kt_auth::DeviceId>, action: &str);
+
+    /// Who has this app open changed.
+    ///
+    /// Defaulted to nothing because presence is a nicety: a `TrustSource` that
+    /// does not care about it - every test double here - should not have to say
+    /// so. The daemon overrides it to push the list at the owner's window.
+    fn presence_changed(&self, _slug: &str, _viewers: Vec<kt_types::Viewer>) {}
 
     /// A name for the person sharing, for the viewer pages.
     fn owner_hint(&self) -> String {
@@ -159,6 +172,9 @@ fn normalise_host(host: &str) -> String {
 pub struct ServerState<S: AppSource, T: TrustSource> {
     pub apps: Arc<S>,
     pub trust: Arc<T>,
+    /// Who currently has something open. Shared with the daemon, which is what
+    /// lets the owner's window show it.
+    pub presence: Arc<Presence>,
 }
 
 // Written out rather than derived: `#[derive(Clone)]` would demand `S: Clone`
@@ -169,14 +185,34 @@ impl<S: AppSource, T: TrustSource> Clone for ServerState<S, T> {
         Self {
             apps: Arc::clone(&self.apps),
             trust: Arc::clone(&self.trust),
+            presence: Arc::clone(&self.presence),
         }
     }
 }
 
-pub fn router<S: AppSource, T: TrustSource>(apps: Arc<S>, trust: Arc<T>) -> Router {
-    let state = ServerState { apps, trust };
+pub fn router<S: AppSource, T: TrustSource>(
+    apps: Arc<S>,
+    trust: Arc<T>,
+    presence: Arc<Presence>,
+) -> Router {
+    let state = ServerState {
+        apps,
+        trust,
+        presence,
+    };
 
     Router::new()
+        // The live-view client and its check-ins. Static segments, so they win
+        // against the `/{slug}` routes below rather than being mistaken for an
+        // app called `__kt`.
+        .route(&format!("{}/live.js", live::PREFIX), get(live_script))
+        .route(&format!("{}/beat", live::PREFIX), get(beat::<S, T>))
+        // sendBeacon posts; a plain fetch on unload may get a GET. Both mean
+        // the same thing, so both are accepted.
+        .route(
+            &format!("{}/gone", live::PREFIX),
+            get(gone::<S, T>).post(gone::<S, T>),
+        )
         // Invite redemption lives on the app's own hostname so a shared link
         // never bounces the viewer to another domain.
         .route("/i/{token}", get(redeem::<S, T>))
@@ -192,6 +228,102 @@ pub fn router<S: AppSource, T: TrustSource>(apps: Arc<S>, trust: Arc<T>) -> Rout
         .route("/{slug}/{*path}", get(serve_path::<S, T>))
         .with_state(state)
 }
+
+/// The live-view client. Static, and the same for every app.
+async fn live_script() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            // It changes only when the daemon does, and a stale copy would
+            // keep beating at the old interval.
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        live::script(),
+    )
+        .into_response()
+}
+
+/// Which app a check-in is about, and the page it came from.
+#[derive(serde::Deserialize)]
+struct Beat {
+    app: String,
+    #[serde(default)]
+    path: String,
+}
+
+/// A page saying it is still open.
+///
+/// Gated exactly like the page itself: presence is a fact about who is reading
+/// an app, so anyone who could not open it cannot appear in its list either.
+/// Answers 204 whatever happens - it is a side channel, and a page must never
+/// show an error because a check-in failed.
+async fn beat<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    axum::extract::Query(beat): axum::extract::Query<Beat>,
+    headers: axum::http::HeaderMap,
+    peer: Peer,
+) -> Response {
+    let Some(app) = state.apps.get(&beat.app) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let device = state.trust.device_for(&headers);
+    let ctx = kt_auth::RequestContext {
+        session: None,
+        on_household_network: state.trust.on_household_network(),
+        is_loopback: gate::is_loopback(peer.0),
+    };
+    if !matches!(
+        gate::gate(app.visibility, app.paused, device.as_ref(), &ctx),
+        gate::Gated::Serve
+    ) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    // The owner's own browser has no device record, so it is named by what it
+    // is rather than being dropped: they are reading it too.
+    let who = device
+        .as_ref()
+        .map(|d| d.id.as_str().to_string())
+        .unwrap_or_else(|| OWNER.to_string());
+
+    let path = if beat.path.is_empty() {
+        "/".to_string()
+    } else {
+        beat.path.clone()
+    };
+    if state.presence.beat(&app.slug, &who, &path) {
+        state
+            .trust
+            .presence_changed(&app.slug, state.presence.viewers(&app.slug));
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// A page saying it has gone, so the list empties without waiting for the
+/// entry to age out.
+async fn gone<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    axum::extract::Query(beat): axum::extract::Query<Beat>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let who = state
+        .trust
+        .device_for(&headers)
+        .map(|d| d.id.as_str().to_string())
+        .unwrap_or_else(|| OWNER.to_string());
+
+    if state.presence.left(&beat.app, &who) {
+        state
+            .trust
+            .presence_changed(&beat.app, state.presence.viewers(&beat.app));
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Stands in for the owner's own browser, which has no device record because it
+/// never had to pair with itself.
+pub const OWNER: &str = "owner";
 
 /// Redeem an invite link.
 ///
@@ -268,7 +400,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
         is_loopback: gate::is_loopback(peer.0),
     };
 
-    match gate::gate(app.visibility, device.as_ref(), &ctx) {
+    match gate::gate(app.visibility, app.paused, device.as_ref(), &ctx) {
         gate::Gated::Serve => {
             state
                 .trust
@@ -291,9 +423,16 @@ async fn guarded<S: AppSource, T: TrustSource>(
                 .log(&app.slug, device.as_ref().map(|d| &d.id), "refused");
             let body = match reason {
                 gate::Refusal::WrongNetwork => pages::wrong_network(&app.name),
+                gate::Refusal::Paused => pages::paused(&app.name),
                 gate::Refusal::NotShared | gate::Refusal::Revoked => pages::denied(&app.name),
             };
-            (StatusCode::FORBIDDEN, html_body(body)).into_response()
+            // 503 rather than 403 for a pause: nothing is wrong with the
+            // request or the requester, the app is simply not running.
+            let status = match reason {
+                gate::Refusal::Paused => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::FORBIDDEN,
+            };
+            (status, html_body(body)).into_response()
         }
     }
 }
@@ -387,6 +526,20 @@ async fn serve_app(app: &ServedApp, path: &str) -> Response {
     match tokio::fs::read(&file).await {
         Ok(bytes) => {
             let mime = mime_guess::from_path(&file).first_or_octet_stream();
+
+            // HTML documents carry the live-view tag; everything else goes out
+            // byte for byte. This is the only edit made to anyone's files, it
+            // happens on the way out, and nothing is written back to disk.
+            //
+            // Lossy rather than strict: a page with a stray invalid byte should
+            // still render, which is what a browser would do with it anyway.
+            let body = if mime.essence_str() == "text/html" {
+                let html = String::from_utf8_lossy(&bytes);
+                Body::from(live::inject(&html, &app.slug))
+            } else {
+                Body::from(bytes)
+            };
+
             (
                 StatusCode::OK,
                 [
@@ -395,7 +548,7 @@ async fn serve_app(app: &ServedApp, path: &str) -> Response {
                     // look like it did nothing.
                     (header::CACHE_CONTROL, "no-cache".to_string()),
                 ],
-                Body::from(bytes),
+                body,
             )
                 .into_response()
         }

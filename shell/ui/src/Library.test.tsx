@@ -9,6 +9,7 @@ function app(over: Partial<App> = {}): App {
     entry: "index.html",
     visibility: "private",
     version: 1,
+    paused: false,
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
