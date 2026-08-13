@@ -14,6 +14,7 @@ use kt_store::Store;
 use kt_types::{paths, DegradedReason, ServingState, Urls};
 
 mod authoring;
+mod keys;
 mod library;
 mod rpc;
 mod socket;
@@ -93,10 +94,16 @@ async fn run() -> Result<(), StartupError> {
     let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
     let library = Arc::new(Library::new());
 
-    // Session keys live in the Keychain from D7; until then they are
-    // regenerated each start, which means sessions do not survive a restart.
-    // Safe, and visible: a viewer simply pairs again.
-    let keys = Arc::new(kt_auth::SessionKeys::generate());
+    // The session key outlives the process, so a restart is invisible to
+    // everyone who has already paired. Tests set KT_NO_KEYCHAIN: the e2e suite
+    // spawns real daemons, and one shared login-keychain item would defeat the
+    // per-test HOME isolation they depend on.
+    let secrets: Arc<dyn kt_certs::SecretStore> = if std::env::var_os("KT_NO_KEYCHAIN").is_some() {
+        Arc::new(kt_certs::FileStore::new(&paths::state_dir(&home)))
+    } else {
+        Arc::from(kt_certs::for_this_platform(&paths::state_dir(&home)))
+    };
+    let keys = keys::load_or_create(secrets);
     let trust = Arc::new(trust::Trust::new(Arc::clone(&store), keys));
 
     let (listener, port, port_degraded) = bind_http().await?;

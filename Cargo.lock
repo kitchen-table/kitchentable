@@ -489,6 +489,9 @@ dependencies = [
 [[package]]
 name = "kt-certs"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "kt-cli"
@@ -506,6 +509,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "kt-auth",
+ "kt-certs",
  "kt-mdns",
  "kt-registry",
  "kt-server",
