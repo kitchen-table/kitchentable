@@ -137,22 +137,65 @@ impl<S: Send + Sync> FromRequestParts<S> for Host {
     }
 }
 
-/// The peer address, when the server was started with connect info.
+/// A marker put in a request's extensions by the relay client, saying this one
+/// arrived down the tunnel rather than off the local network.
 ///
-/// Absent rather than fatal if it is missing: the only thing it grants is the
-/// owner's own-machine exemption, so losing it can refuse but never over-permit.
-struct Peer(Option<std::net::IpAddr>);
+/// Its absence means local, which is the safe default: a request that forgets
+/// to say it is relayed is treated as the *more* suspicious kind only in the
+/// sense that it keeps whatever the local checks decide - and the local checks
+/// begin from an address, which a relayed request does not have. Forgetting to
+/// insert it cannot grant anything that the address alone would not.
+#[derive(Debug, Clone, Copy)]
+pub struct ArrivedByRelay;
+
+/// Where a request came from, and by what route.
+///
+/// Absent address rather than fatal if it is missing: the only thing it grants
+/// is the owner's own-machine exemption, so losing it can refuse but never
+/// over-permit.
+struct Peer {
+    address: Option<std::net::IpAddr>,
+    /// True when this came down the relay tunnel.
+    relayed: bool,
+}
+
+impl Peer {
+    /// Everything the gate is told about where a request came from.
+    ///
+    /// The single place this is assembled, on purpose. Both exemptions in the
+    /// visibility model - the household network and the owner's own machine -
+    /// are decided here and nowhere else, so a new handler cannot accidentally
+    /// grant one by building a context by hand.
+    ///
+    /// **A relayed request gets neither, whatever else is true.** The household
+    /// flag is a fact about this *machine*, not about the request: the laptop
+    /// really is on the home network, and a request that arrived from the
+    /// internet by way of a datacentre would otherwise inherit that and be
+    /// handed a Household app. The whole visibility model exists to stop
+    /// exactly that, so it is `false` by construction rather than by whoever
+    /// remembers.
+    fn context<T: TrustSource>(&self, trust: &T) -> kt_auth::RequestContext {
+        kt_auth::RequestContext {
+            session: None,
+            on_household_network: !self.relayed && trust.on_household_network(),
+            // The owner's own browser must never have to pair with itself -
+            // and nothing arriving over the tunnel is the owner's own browser.
+            is_loopback: !self.relayed && gate::is_loopback(self.address),
+        }
+    }
+}
 
 impl<S: Send + Sync> FromRequestParts<S> for Peer {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Peer(
-            parts
+        Ok(Peer {
+            address: parts
                 .extensions
                 .get::<ConnectInfo<std::net::SocketAddr>>()
                 .map(|ConnectInfo(addr)| addr.ip()),
-        ))
+            relayed: parts.extensions.get::<ArrivedByRelay>().is_some(),
+        })
     }
 }
 
@@ -268,11 +311,7 @@ async fn beat<S: AppSource, T: TrustSource>(
         return StatusCode::NO_CONTENT.into_response();
     };
     let device = state.trust.device_for(&headers);
-    let ctx = kt_auth::RequestContext {
-        session: None,
-        on_household_network: state.trust.on_household_network(),
-        is_loopback: gate::is_loopback(peer.0),
-    };
+    let ctx = peer.context(state.trust.as_ref());
     if !matches!(
         gate::gate(app.visibility, app.paused, device.as_ref(), &ctx),
         gate::Gated::Serve
@@ -280,7 +319,7 @@ async fn beat<S: AppSource, T: TrustSource>(
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    let who = viewer_id(device.as_ref(), peer.0);
+    let who = viewer_id(device.as_ref(), peer.address);
 
     let path = if beat.path.is_empty() {
         "/".to_string()
@@ -303,7 +342,7 @@ async fn gone<S: AppSource, T: TrustSource>(
     headers: axum::http::HeaderMap,
     peer: Peer,
 ) -> Response {
-    let who = viewer_id(state.trust.device_for(&headers).as_ref(), peer.0);
+    let who = viewer_id(state.trust.device_for(&headers).as_ref(), peer.address);
 
     if state.presence.left(&beat.app, &who) {
         state
@@ -407,12 +446,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
     peer: &Peer,
 ) -> Response {
     let device = state.trust.device_for(headers);
-    let ctx = kt_auth::RequestContext {
-        session: None,
-        on_household_network: state.trust.on_household_network(),
-        // The owner's own browser must never have to pair with itself.
-        is_loopback: gate::is_loopback(peer.0),
-    };
+    let ctx = peer.context(state.trust.as_ref());
 
     match gate::gate(app.visibility, app.paused, device.as_ref(), &ctx) {
         gate::Gated::Serve => {
@@ -422,7 +456,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
             serve_app(app, path).await
         }
         gate::Gated::Waiting => {
-            let redemption = state.trust.request_access(headers, &app.slug, peer.0);
+            let redemption = state.trust.request_access(headers, &app.slug, peer.address);
             let mut response = html(pages::waiting(&app.name, &state.trust.owner_hint()));
             if let Some(cookie) = redemption.cookie {
                 if let Ok(value) = cookie.parse() {
@@ -613,6 +647,136 @@ mod tests {
         assert_eq!(
             escape(r#"<script>alert("x")</script>"#),
             "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"
+        );
+    }
+
+    /// A trust source that says yes to the household question, which is what
+    /// the daemon on a real home network says.
+    struct AtHome;
+
+    impl TrustSource for AtHome {
+        fn device_for(&self, _: &axum::http::HeaderMap) -> Option<kt_auth::Device> {
+            None
+        }
+        fn on_household_network(&self) -> bool {
+            true
+        }
+        fn redeem(&self, _: &axum::http::HeaderMap, _: &str) -> Result<Redemption, String> {
+            Err("not in this test".into())
+        }
+        fn request_access(
+            &self,
+            _: &axum::http::HeaderMap,
+            _: &str,
+            _: Option<std::net::IpAddr>,
+        ) -> Redemption {
+            Redemption {
+                cookie: None,
+                app_slug: String::new(),
+                pending: true,
+            }
+        }
+        fn log(&self, _: &str, _: Option<&kt_auth::DeviceId>, _: &str) {}
+    }
+
+    fn lan(address: &str) -> Peer {
+        Peer {
+            address: Some(address.parse().expect("an address")),
+            relayed: false,
+        }
+    }
+
+    fn relayed(address: &str) -> Peer {
+        Peer {
+            address: Some(address.parse().expect("an address")),
+            relayed: true,
+        }
+    }
+
+    #[test]
+    fn a_relayed_request_does_not_inherit_this_machines_household_network() {
+        // The bug this whole arrangement exists to prevent, stated as a test.
+        //
+        // "On the household network" is a fact about the laptop, not about the
+        // request. The laptop really is at home, so the trust source really
+        // does say true - and a request that arrived from the internet by way
+        // of a datacentre must still be told no, or every Household app in the
+        // house is served to whoever has the URL.
+        let ctx = relayed("203.0.113.9").context(&AtHome);
+
+        assert!(
+            !ctx.on_household_network,
+            "a request off the internet was treated as being on the home network"
+        );
+        assert!(!ctx.is_loopback);
+
+        // And the gate, which is the thing that actually decides, agrees.
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::Decision::Deny(kt_auth::DenyReason::WrongNetwork)
+        );
+    }
+
+    #[test]
+    fn the_same_request_off_the_local_network_is_allowed() {
+        // The other half, so the test above is measuring the relay flag rather
+        // than something that refuses everybody.
+        let ctx = lan("192.168.0.51").context(&AtHome);
+
+        assert!(ctx.on_household_network);
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_relayed_request_claiming_a_loopback_address_is_still_not_the_owner() {
+        // The edge reports whatever address it saw, and a viewer can be behind
+        // their own NAT. If that address were taken at face value, 127.0.0.1
+        // in a forwarded header would be the owner's own machine - which opens
+        // every Private app in the library.
+        let ctx = relayed("127.0.0.1").context(&AtHome);
+
+        assert!(!ctx.is_loopback, "a relayed request claimed to be local");
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Private, false, None, &ctx),
+            kt_auth::Decision::Deny(kt_auth::DenyReason::NotTheOwner)
+        );
+    }
+
+    #[test]
+    fn a_relayed_request_claiming_a_private_address_is_not_on_the_network() {
+        // Same trick one step out: a viewer behind their own home router
+        // legitimately has a 192.168 address, and it means nothing here.
+        let ctx = relayed("192.168.0.51").context(&AtHome);
+
+        assert!(!ctx.on_household_network);
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::Decision::Deny(kt_auth::DenyReason::WrongNetwork)
+        );
+    }
+
+    #[test]
+    fn a_relayed_request_can_still_reach_a_public_app() {
+        // The relay is not a blanket refusal - it is the only way Public means
+        // what the picker says it means. Nothing above should have broken that.
+        let ctx = relayed("203.0.113.9").context(&AtHome);
+
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Public, false, None, &ctx),
+            kt_auth::Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_paused_app_is_closed_to_the_relay_too() {
+        let ctx = relayed("203.0.113.9").context(&AtHome);
+
+        assert_eq!(
+            kt_auth::decide(kt_types::Visibility::Public, true, None, &ctx),
+            kt_auth::Decision::Deny(kt_auth::DenyReason::Paused)
         );
     }
 }
