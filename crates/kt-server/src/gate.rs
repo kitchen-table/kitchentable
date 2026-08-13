@@ -29,6 +29,9 @@ pub enum Refusal {
     NotShared,
     WrongNetwork,
     Revoked,
+    /// The owner took it offline. Nothing the viewer can do about it, so the
+    /// page says so plainly rather than implying they are unwelcome.
+    Paused,
 }
 
 /// Look up the session cookie, if any, and verify it.
@@ -46,13 +49,19 @@ pub fn session_device(headers: &HeaderMap, keys: &SessionKeys, now: i64) -> Opti
 }
 
 /// Decide what to do with a request for an app.
-pub fn gate(visibility: Visibility, device: Option<&Device>, ctx: &RequestContext) -> Gated {
-    match kt_auth::decide(visibility, device, ctx) {
+pub fn gate(
+    visibility: Visibility,
+    paused: bool,
+    device: Option<&Device>,
+    ctx: &RequestContext,
+) -> Gated {
+    match kt_auth::decide(visibility, paused, device, ctx) {
         Decision::Allow => Gated::Serve,
         Decision::NeedsPairing => Gated::Waiting,
         Decision::Deny(DenyReason::WrongNetwork) => Gated::Refused(Refusal::WrongNetwork),
         Decision::Deny(DenyReason::DeviceRevoked) => Gated::Refused(Refusal::Revoked),
         Decision::Deny(DenyReason::NotTheOwner) => Gated::Refused(Refusal::NotShared),
+        Decision::Deny(DenyReason::Paused) => Gated::Refused(Refusal::Paused),
     }
 }
 
@@ -157,7 +166,7 @@ mod tests {
     #[test]
     fn an_unknown_device_on_an_invited_app_waits_rather_than_being_refused() {
         let ctx = RequestContext::default();
-        assert_eq!(gate(Visibility::Invited, None, &ctx), Gated::Waiting);
+        assert_eq!(gate(Visibility::Invited, false, None, &ctx), Gated::Waiting);
     }
 
     #[test]
@@ -167,11 +176,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            gate(Visibility::Network, None, &away),
+            gate(Visibility::Network, false, None, &away),
             Gated::Refused(Refusal::WrongNetwork)
         );
         assert_eq!(
-            gate(Visibility::Private, None, &away),
+            gate(Visibility::Private, false, None, &away),
             Gated::Refused(Refusal::NotShared)
         );
 
@@ -181,7 +190,7 @@ mod tests {
             ..revoked
         };
         assert_eq!(
-            gate(Visibility::Public, Some(&revoked), &away),
+            gate(Visibility::Public, false, Some(&revoked), &away),
             Gated::Refused(Refusal::Revoked)
         );
     }
@@ -199,7 +208,7 @@ mod tests {
             Visibility::Public,
         ] {
             assert_eq!(
-                gate(visibility, None, &local),
+                gate(visibility, false, None, &local),
                 Gated::Serve,
                 "{visibility:?}"
             );

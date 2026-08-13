@@ -228,6 +228,32 @@ impl Daemon {
         std::fs::write(dir.join("index.html"), html).expect("writes index.html");
     }
 
+    /// Subscribe on a connection of its own and hand back the reader.
+    ///
+    /// Its own connection because that is how the shell uses it: one long-lived
+    /// subscriber alongside ordinary request/response traffic. Sharing a
+    /// connection would let an event land between a request and its answer,
+    /// which is exactly the interleaving this needs to prove does not happen.
+    fn subscribe(&self) -> BufReader<UnixStream> {
+        let stream = UnixStream::connect(self.socket()).expect("connects");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .expect("sets timeout");
+
+        let mut writer = &stream;
+        writer
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"event.subscribe\"}\n")
+            .expect("subscribes");
+
+        let mut reader = BufReader::new(stream);
+        let mut ack = String::new();
+        reader
+            .read_line(&mut ack)
+            .expect("reads the acknowledgement");
+        assert!(ack.contains("subscribed"), "expected an ack, got {ack}");
+        reader
+    }
+
     /// Poll until `predicate` holds, so tests do not depend on watcher timing.
     fn wait_for(&self, what: &str, predicate: impl Fn(&serde_json::Value) -> bool) {
         let deadline = Instant::now() + CHANGE_TIMEOUT;
@@ -286,6 +312,17 @@ fn daemon_binary() -> PathBuf {
     binary
 }
 
+/// Whether the response is `html`, as served.
+///
+/// Not equality: Kitchen Table adds one script tag to HTML documents on the way
+/// out, so the page can say it is still open. That is the only edit it makes,
+/// so the test is that the app's own markup arrived intact and the tag came
+/// with it - which is also the assertion that would fail if anything else ever
+/// started rewriting people's pages.
+fn served(body: &str, html: &str) -> bool {
+    body.starts_with(html) && body.contains("/__kt/live.js") && body.len() < html.len() + 200
+}
+
 fn slugs(apps: &serde_json::Value) -> Vec<String> {
     apps.as_array()
         .expect("an array")
@@ -307,7 +344,7 @@ fn a_folder_dropped_in_becomes_a_served_app() {
 
     let (status, body) = daemon.get("/trip-planner/");
     assert_eq!(status, 200);
-    assert_eq!(body, "<h1>Portugal</h1>");
+    assert!(served(&body, "<h1>Portugal</h1>"), "got {body}");
 }
 
 #[test]
@@ -423,7 +460,10 @@ fn every_spelling_of_an_app_root_serves_it() {
     for path in ["/trip", "/trip/", "/trip/index.html"] {
         let (status, body) = daemon.get(path);
         assert_eq!(status, 200, "{path} should serve");
-        assert_eq!(body, "<h1>trip</h1>", "{path} should serve the entry point");
+        assert!(
+            served(&body, "<h1>trip</h1>"),
+            "{path} should serve the entry point, got {body}"
+        );
     }
 }
 
@@ -438,7 +478,7 @@ fn a_private_app_is_refused_to_anyone_but_the_owner() {
     // The owner's own browser: always allowed, no pairing with itself.
     let (status, body) = daemon.get("/diary/");
     assert_eq!(status, 200);
-    assert_eq!(body, "<h1>secret</h1>");
+    assert!(served(&body, "<h1>secret</h1>"), "got {body}");
 
     // Anyone else on the network: refused, and the content never appears.
     let (status, body) = daemon.get_as_stranger("/diary/");
@@ -468,7 +508,7 @@ fn a_household_app_opens_for_the_network() {
             status, 200,
             "a household app should open on the home network"
         );
-        assert_eq!(body, "<h1>bins</h1>");
+        assert!(served(&body, "<h1>bins</h1>"), "got {body}");
     }
 }
 
@@ -785,6 +825,333 @@ fn an_approved_device_stays_approved_across_a_restart() {
     assert_eq!(after.len(), 1, "no duplicate device was created: {devices}");
     assert_eq!(after[0]["id"], id.as_str());
     assert_eq!(after[0]["status"], "approved");
+}
+
+/// Read events until `wanted` shows up, or give up.
+///
+/// By name rather than by position: the daemon is free to say other true things
+/// first, and a test that breaks when it does would be testing the order rather
+/// than the event.
+fn wait_for_event(reader: &mut BufReader<UnixStream>, wanted: &str) -> serde_json::Value {
+    let deadline = Instant::now() + CHANGE_TIMEOUT;
+    let mut seen = Vec::new();
+
+    while Instant::now() < deadline {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let params = value["params"].clone();
+        if params["event"] == wanted {
+            return params;
+        }
+        seen.push(params["event"].as_str().unwrap_or("?").to_string());
+    }
+    panic!("never saw {wanted}; saw {seen:?}");
+}
+
+#[test]
+fn a_subscriber_is_told_when_an_app_appears_and_when_it_leaves() {
+    // The window polled every two seconds before this existed. The point is
+    // not only that the event arrives but that it arrives without anybody
+    // asking, so this never calls app.list.
+    let daemon = Daemon::start();
+    let mut events = daemon.subscribe();
+
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    let appeared = wait_for_event(&mut events, "app_changed");
+    assert_eq!(appeared["app"]["slug"], "portugal");
+    assert_eq!(
+        appeared["app"]["url"],
+        format!("http://localhost:{}/portugal", daemon.port),
+        "the event carries the app as the window would show it, URL and all: {appeared}"
+    );
+
+    std::fs::remove_dir_all(daemon.workspace.join("Portugal")).expect("removes the folder");
+    let gone = wait_for_event(&mut events, "app_removed");
+    assert_eq!(gone["slug"], "portugal");
+}
+
+#[test]
+fn only_the_app_that_changed_is_announced() {
+    // A scan sees the whole workspace. Restating all of it on every change
+    // would have the window refetching twenty apps because one of them moved,
+    // so the events describe the difference rather than the contents.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the first app", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    let mut events = daemon.subscribe();
+    daemon.add_app("Iceland", "<h1>iceland</h1>");
+    daemon.wait_for("the second app", |apps| {
+        slugs(apps).contains(&"iceland".to_string())
+    });
+
+    // The next app_changed must be the new one. Portugal has not been touched,
+    // so hearing about it here would mean the whole library was restated.
+    let announced = wait_for_event(&mut events, "app_changed");
+    assert_eq!(
+        announced["app"]["slug"], "iceland",
+        "expected only the new app to be announced: {announced}"
+    );
+}
+
+#[test]
+fn a_waiting_device_announces_itself_rather_than_waiting_to_be_noticed() {
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+    daemon.wait_for("invited to stick", |apps| {
+        apps.as_array()
+            .is_some_and(|a| a.iter().any(|app| app["visibility"] == "invited"))
+    });
+
+    let mut events = daemon.subscribe();
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return; // no network on this runner
+    }
+
+    let asked = wait_for_event(&mut events, "pairing_request");
+    let id = asked["device_id"].as_str().expect("carries the device");
+
+    let devices = daemon.call("device.list", None);
+    assert!(
+        devices
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|d| d["id"] == id && d["status"] == "pending"),
+        "the event named a device that is really waiting: {devices}"
+    );
+}
+
+#[test]
+fn a_page_that_checks_in_shows_up_as_reading_the_app() {
+    // The whole reason the script exists. Serving static files leaves nothing
+    // to observe, so this is the only path by which the owner's window can
+    // know somebody has an app open - and it has to work over real HTTP,
+    // through the real gate, with the real routes.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    // Nobody has said anything yet, so nobody is reading it.
+    let empty = daemon.call(
+        "presence.list",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+    assert_eq!(empty.as_array().expect("array").len(), 0);
+
+    // The page arrives with the tag that does the checking in.
+    let (status, body) = daemon.get("/portugal/");
+    assert_eq!(status, 200);
+    assert!(body.contains("/__kt/live.js?app=portugal"), "got {body}");
+
+    // And the script itself is really served, rather than 404ing into a page
+    // that then silently never reports anything.
+    let (status, script) = daemon.get("/__kt/live.js?app=portugal");
+    assert_eq!(status, 200, "the live-view client must be reachable");
+    assert!(script.contains("__kt/beat"), "got {script}");
+
+    // Now do what the script does.
+    let (status, _) = daemon.get("/__kt/beat?app=portugal&path=/budget");
+    assert_eq!(status, 204);
+
+    let viewers = daemon.call(
+        "presence.list",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+    let viewers = viewers.as_array().expect("array");
+    assert_eq!(viewers.len(), 1, "somebody is reading it: {viewers:?}");
+    assert_eq!(viewers[0]["path"], "/budget", "and the page they are on");
+
+    // Closing the tab empties the list rather than leaving a name up until it
+    // ages out.
+    let (status, _) = daemon.get("/__kt/gone?app=portugal");
+    assert_eq!(status, 204);
+    let after = daemon.call(
+        "presence.list",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+    assert_eq!(after.as_array().expect("array").len(), 0, "{after}");
+}
+
+#[test]
+fn checking_in_reaches_subscribers_without_being_asked() {
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    let mut events = daemon.subscribe();
+    daemon.get("/__kt/beat?app=portugal&path=/");
+
+    let live = wait_for_event(&mut events, "presence");
+    assert_eq!(live["app_slug"], "portugal");
+    assert_eq!(live["viewers"].as_array().expect("array").len(), 1);
+}
+
+#[test]
+fn an_asset_is_served_exactly_as_it_is_on_disk() {
+    // The script goes into HTML documents and nothing else. A stylesheet or a
+    // script file that came back with markup appended would be corrupt.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    std::fs::write(
+        daemon.workspace.join("Portugal").join("app.css"),
+        "body{color:red}",
+    )
+    .expect("writes a stylesheet");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    let (status, body) = daemon.get("/portugal/app.css");
+    assert_eq!(status, 200);
+    assert_eq!(body, "body{color:red}", "assets go out untouched");
+}
+
+#[test]
+fn pausing_takes_an_app_offline_for_everyone_and_resuming_brings_it_back() {
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    let (status, body) = daemon.get("/portugal/");
+    assert_eq!(status, 200);
+    assert!(served(&body, "<html><body><h1>portugal</h1>"), "got {body}");
+
+    daemon.call("app.pause", Some(serde_json::json!({ "slug": "portugal" })));
+
+    // Including the owner, on this machine. "Take it offline" is not a
+    // visibility level with an exception for the person who pressed it.
+    let (status, body) = daemon.get("/portugal/");
+    assert_eq!(status, 503, "a paused app is unavailable, not forbidden");
+    assert!(body.contains("Paused"), "got {body}");
+    assert!(
+        !body.contains("<h1>portugal</h1>"),
+        "content leaked: {body}"
+    );
+
+    // It is still in the library, with its links and devices intact - that is
+    // the whole difference between pausing and forgetting.
+    let apps = daemon.call("app.list", None);
+    assert!(slugs(&apps).contains(&"portugal".to_string()));
+    assert!(
+        apps.as_array()
+            .expect("array")
+            .iter()
+            .any(|a| a["slug"] == "portugal" && a["paused"] == true),
+        "the window needs to be able to see it is paused: {apps}"
+    );
+
+    daemon.call(
+        "app.resume",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+    let (status, body) = daemon.get("/portugal/");
+    assert_eq!(status, 200, "resuming brings it back");
+    assert!(served(&body, "<html><body><h1>portugal</h1>"), "got {body}");
+}
+
+#[test]
+fn pausing_survives_a_restart() {
+    // It is written to the manifest, not just held in memory, so an app taken
+    // offline stays offline through an update.
+    let mut daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.call("app.pause", Some(serde_json::json!({ "slug": "portugal" })));
+
+    daemon.restart();
+    daemon.wait_for("the app to come back", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    let (status, _) = daemon.get("/portugal/");
+    assert_eq!(status, 503, "still paused after a restart");
+}
+
+#[test]
+fn forgetting_an_app_leaves_the_folder_alone_and_the_watcher_does_not_re_add_it() {
+    // The trap this exists for: the workspace watcher's whole job is to notice
+    // folders and register them, so simply dropping the row would have the app
+    // back within a second.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+
+    daemon.call(
+        "app.forget",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+
+    daemon.wait_for("the app to leave the library", |apps| {
+        !slugs(apps).contains(&"portugal".to_string())
+    });
+
+    // The promise the window makes.
+    let folder = daemon.workspace.join("Portugal");
+    assert!(
+        folder.join("index.html").exists(),
+        "the folder is untouched"
+    );
+
+    // Poke the workspace so the watcher runs again, and confirm it stays gone.
+    std::fs::write(folder.join("notes.txt"), "still here").expect("writes");
+    std::thread::sleep(Duration::from_secs(3));
+    let apps = daemon.call("app.list", None);
+    assert!(
+        !slugs(&apps).contains(&"portugal".to_string()),
+        "a forgotten app came back on the next scan: {apps}"
+    );
+
+    let (status, _) = daemon.get("/portugal/");
+    assert_eq!(status, 404, "and it is not served either");
+}
+
+#[test]
+fn forgetting_survives_a_restart() {
+    let mut daemon = Daemon::start();
+    daemon.add_app("Portugal", "<html><body><h1>portugal</h1></body></html>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.call(
+        "app.forget",
+        Some(serde_json::json!({ "slug": "portugal" })),
+    );
+    daemon.wait_for("the app to leave", |apps| {
+        !slugs(apps).contains(&"portugal".to_string())
+    });
+
+    daemon.restart();
+    std::thread::sleep(Duration::from_secs(2));
+
+    let apps = daemon.call("app.list", None);
+    assert!(
+        !slugs(&apps).contains(&"portugal".to_string()),
+        "a forgotten app came back after a restart: {apps}"
+    );
 }
 
 #[test]

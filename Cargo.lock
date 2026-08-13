@@ -555,6 +555,7 @@ dependencies = [
  "kt-auth",
  "kt-types",
  "mime_guess",
+ "serde",
  "thiserror",
  "tokio",
  "tower",

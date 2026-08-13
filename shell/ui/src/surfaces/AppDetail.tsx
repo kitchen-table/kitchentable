@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import type { App } from "../generated";
 import { Qr } from "../Qr";
-import { Sharing } from "../Sharing";
-import { type AccessEvent, ago, describe, size } from "../activity";
+import { type InviteView, Sharing } from "../Sharing";
+import { type AccessEvent, ago, describe, sentence, size } from "../activity";
 import { call } from "../daemon";
+import { useDevices } from "../devices";
+import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
+import { DangerZone } from "./DangerZone";
 import { Devices } from "./Devices";
 import { APP_TABS, APP_TAB_LABELS, type AppTab, type Surface } from "../navigation";
 import { VISIBILITY, tileColour } from "../visibility";
@@ -179,7 +182,9 @@ export function AppDetail({
 
       <div role="tabpanel" style={{ padding: "24px 30px", flex: 1, minHeight: 0 }}>
         {!app.entry_exists && <NoEntry app={app} />}
-        {tab === "overview" && <Overview app={app} onTab={onTab} />}
+        {tab === "overview" && (
+          <Overview app={app} onTab={onTab} onNavigate={onNavigate} />
+        )}
         {tab === "sharing" && <Sharing app={app} />}
         {tab === "devices" && <Devices />}
         {tab !== "overview" && tab !== "sharing" && tab !== "devices" && (
@@ -244,12 +249,37 @@ function NoEntry({ app }: { app: App }) {
   );
 }
 
-function Overview({ app, onTab }: { app: App; onTab: (tab: AppTab) => void }) {
+function Overview({
+  app,
+  onTab,
+  onNavigate,
+}: {
+  app: App;
+  onTab: (tab: AppTab) => void;
+  onNavigate: (surface: Surface) => void;
+}) {
   const log = useQuery({
     queryKey: ["log", app.slug],
     queryFn: () => call<AccessEvent[]>("log.query", { slug: app.slug, limit: 100 }),
     retry: false,
   });
+
+  // Shares react-query's ["devices"] entry with the pairing badge and the
+  // Devices tab, so naming the rows costs no extra traffic.
+  const devices = useDevices();
+  const nameOf = new Map((devices.data ?? []).map((device) => [device.id, device.name]));
+
+  const invites = useQuery({
+    queryKey: ["invites", app.slug],
+    queryFn: () => call<InviteView[]>("share.list_invites", { slug: app.slug }),
+    retry: false,
+  });
+  // The newest link someone could still open. A revoked or expired one is not
+  // worth a panel offering to hand it round.
+  const live = (invites.data ?? []).filter((invite) => invite.active).at(0);
+
+  const presence = usePresence(app.slug);
+  const viewers = presence.data ?? [];
 
   const events = log.data ?? [];
   const opens = events.filter((event) => event.action === "opened").length;
@@ -258,18 +288,70 @@ function Overview({ app, onTab }: { app: App; onTab: (tab: AppTab) => void }) {
     <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 20 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18, minWidth: 0 }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-          {/* "Online now" needs a live view of who is connected, which arrives
-              with event.* subscriptions. A dash is honest; a zero would not be. */}
-          <Stat value="—" label="online now" accent />
-          <Stat value={String(opens)} label="total opens" />
+          {/* A real number now that pages check in. Still a dash until the
+              first answer arrives, because zero is a claim and "not asked yet"
+              is not the same as "nobody". */}
           <Stat
-            value={String(app.version)}
+            value={presence.isPending ? "—" : String(viewers.length)}
+            label="online now"
+            accent
+          />
+          <Stat value={String(opens)} label="total opens" />
+          {/* "v7", not "7": the version reads as a name everywhere else in the
+              product, and the label carries when it landed. */}
+          <Stat
+            value={`v${app.version}`}
             label={
-              app.deployed_at ? `changed ${ago(app.deployed_at)} ago` : "current version"
+              app.deployed_at ? `deployed ${ago(app.deployed_at)} ago` : "current version"
             }
           />
           <Stat value={size(app.size_bytes)} label="bundle size" />
         </div>
+
+        {/* Above the history, as the mockup has it: who is reading it now is
+            the question an owner asks first. Known only because the page says
+            so - see the `live` module in kt-server - which is why an app nobody
+            has opened since the daemon started shows nobody. */}
+        <Panel title="Live now">
+          {viewers.length === 0 ? (
+            <Empty>Nobody has this open right now.</Empty>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {viewers.map((viewer) => (
+                <div
+                  key={viewer.device_id}
+                  style={{ display: "flex", alignItems: "center", gap: 11 }}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 9,
+                      height: 9,
+                      borderRadius: "50%",
+                      flex: "none",
+                      background: "var(--green)",
+                    }}
+                  />
+                  <span style={{ font: "600 13px var(--font-sans)" }}>
+                    {viewerName(viewer, nameOf)}
+                  </span>
+                  <span style={{ font: "400 12px var(--font-sans)", color: "var(--muted)" }}>
+                    viewing {viewerWhere(viewer)}
+                  </span>
+                  <span
+                    style={{
+                      marginLeft: "auto",
+                      font: "400 11px var(--font-mono)",
+                      color: "var(--faint)",
+                    }}
+                  >
+                    {viewerWhen(viewer)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
 
         <Panel title="Recent activity" action={{ label: "View all", onClick: () => onTab("activity") }}>
           {events.length === 0 ? (
@@ -279,11 +361,20 @@ function Overview({ app, onTab }: { app: App; onTab: (tab: AppTab) => void }) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column" }}>
               {events.slice(0, 5).map((event, index) => (
-                <Row key={`${event.at}-${index}`} event={event} />
+                <Row
+                  key={`${event.at}-${index}`}
+                  event={event}
+                  deviceName={event.device_id ? nameOf.get(event.device_id) : undefined}
+                />
               ))}
             </div>
           )}
         </Panel>
+
+        <DangerZone
+          app={app}
+          onGone={() => onNavigate({ kind: "library", filter: null })}
+        />
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -335,9 +426,33 @@ function Overview({ app, onTab }: { app: App; onTab: (tab: AppTab) => void }) {
             cursor: "pointer",
           }}
         >
-          <div style={{ font: "600 12.5px var(--font-sans)", marginBottom: 8 }}>
-            {VISIBILITY[app.visibility].label} · {VISIBILITY[app.visibility].blurb}
-          </div>
+          {/* The mockup shows the live invite link here, which is the thing
+              someone actually wants to hand over. Without one there is nothing
+              to show, so the panel says who can open the app instead - the
+              question it is standing in for either way. */}
+          {live ? (
+            <>
+              <div style={{ font: "600 12.5px var(--font-sans)", marginBottom: 8 }}>
+                Invite link · active
+              </div>
+              <div
+                style={{
+                  font: "400 11.5px var(--font-mono)",
+                  color: "var(--accent)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  marginBottom: 10,
+                }}
+              >
+                {live.url.replace(/^https?:\/\//, "")}
+              </div>
+            </>
+          ) : (
+            <div style={{ font: "600 12.5px var(--font-sans)", marginBottom: 8 }}>
+              {VISIBILITY[app.visibility].label} · {VISIBILITY[app.visibility].blurb}
+            </div>
+          )}
           <span
             style={{
               display: "block",
@@ -444,8 +559,21 @@ export function Panel({
   );
 }
 
-/** One access-log line. Shared by Overview and both Activity views. */
-export function Row({ event, app }: { event: AccessEvent; app?: string }) {
+/**
+ * One access-log line. Shared by Overview and both Activity views.
+ *
+ * `deviceName` is looked up by the caller rather than fetched here: a list of
+ * a hundred rows would otherwise be a hundred subscriptions to the same query.
+ */
+export function Row({
+  event,
+  app,
+  deviceName,
+}: {
+  event: AccessEvent;
+  app?: string;
+  deviceName?: string;
+}) {
   const kind = describe(event.action);
 
   return (
@@ -487,7 +615,7 @@ export function Row({ event, app }: { event: AccessEvent; app?: string }) {
       >
         {app && <b style={{ fontWeight: 700 }}>{app}</b>}
         {app && " · "}
-        {kind.title}
+        {sentence(event, deviceName)}
         {event.detail ? ` — ${event.detail}` : ""}
       </span>
       <span style={{ font: "400 11px var(--font-mono)", color: "var(--faint)", flex: "none" }}>

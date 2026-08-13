@@ -7,6 +7,11 @@ import type { Visibility } from "./Visibility";
  */
 export type App = { slug: string, name: string, icon?: string, entry: string, visibility: Visibility, version: number, 
 /**
+ * Taken offline by the owner. Still listed, still shared with the same
+ * people, but answering nobody until it is resumed.
+ */
+paused: boolean, 
+/**
  * Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
  * prefix URL when nothing was announced.
  */

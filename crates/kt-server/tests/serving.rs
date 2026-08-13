@@ -13,6 +13,16 @@ use axum::http::{Request, StatusCode};
 use kt_server::{router, AppSource, Redemption, ServedApp, TrustSource};
 use tower::ServiceExt;
 
+/// Whether the response is `html`, as served.
+///
+/// Not equality: an HTML document leaves here with one script tag appended, so
+/// the page can tell the owner it is still open. That is the only edit made to
+/// anyone's file, and this is the assertion that would catch anything else
+/// starting to rewrite people's pages.
+fn served(body: &str, html: &str) -> bool {
+    body.starts_with(html) && body.contains("/__kt/live.js") && body.len() < html.len() + 200
+}
+
 struct Fixture {
     apps: Vec<ServedApp>,
     dir: PathBuf,
@@ -51,6 +61,7 @@ impl Fixture {
                     root: root.canonicalize().expect("canonicalises"),
                     entry: "index.html".into(),
                     visibility: kt_types::Visibility::Public,
+                    paused: false,
                 },
                 ServedApp {
                     slug: "chores".into(),
@@ -58,6 +69,7 @@ impl Fixture {
                     root: chores.canonicalize().expect("canonicalises"),
                     entry: "index.html".into(),
                     visibility: kt_types::Visibility::Public,
+                    paused: false,
                 },
             ],
             dir,
@@ -125,16 +137,20 @@ async fn get_with_host(
     uri: &str,
     host: &str,
 ) -> (StatusCode, String, Option<String>) {
-    let response = router(fixture, Arc::new(AllowAll))
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .header("host", host)
-                .body(Body::empty())
-                .expect("builds request"),
-        )
-        .await
-        .expect("serves");
+    let response = router(
+        fixture,
+        Arc::new(AllowAll),
+        Arc::new(kt_server::Presence::new()),
+    )
+    .oneshot(
+        Request::builder()
+            .uri(uri)
+            .header("host", host)
+            .body(Body::empty())
+            .expect("builds request"),
+    )
+    .await
+    .expect("serves");
 
     let status = response.status();
     let content_type = response
@@ -160,7 +176,10 @@ async fn every_spelling_of_the_app_root_serves_the_entry_point() {
     for uri in ["/trip", "/trip/", "/trip/index.html"] {
         let (status, body, _) = get(Arc::clone(&f), uri).await;
         assert_eq!(status, StatusCode::OK, "{uri} should serve");
-        assert_eq!(body, "<h1>home</h1>", "{uri} should be the entry point");
+        assert!(
+            served(&body, "<h1>home</h1>"),
+            "{uri} should be the entry point, got {body}"
+        );
     }
 }
 
@@ -169,7 +188,7 @@ async fn a_subdirectory_serves_its_own_entry_point() {
     let f = Arc::new(Fixture::new());
     let (status, body, _) = get(f, "/trip/sub/").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "<h1>sub</h1>");
+    assert!(served(&body, "<h1>sub</h1>"), "got {body}");
 }
 
 #[tokio::test]
@@ -240,7 +259,10 @@ async fn an_app_hostname_serves_that_app_at_the_root() {
     let (status, body, _) = get_with_host(f, "/", "trip.local").await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "<h1>home</h1>", "the app owns its own origin");
+    assert!(
+        served(&body, "<h1>home</h1>"),
+        "the app owns its own origin, got {body}"
+    );
 }
 
 #[tokio::test]
@@ -255,7 +277,10 @@ async fn a_host_header_is_matched_case_insensitively_and_without_the_port() {
     ] {
         let (status, body, _) = get_with_host(Arc::clone(&f), "/", host).await;
         assert_eq!(status, StatusCode::OK, "{host} should route");
-        assert_eq!(body, "<h1>home</h1>", "{host} should route");
+        assert!(
+            served(&body, "<h1>home</h1>"),
+            "{host} should route, got {body}"
+        );
     }
 }
 
@@ -265,7 +290,7 @@ async fn paths_are_relative_to_the_app_on_its_own_hostname() {
     let (status, body, _) = get_with_host(f, "/sub/", "trip.local").await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "<h1>sub</h1>");
+    assert!(served(&body, "<h1>sub</h1>"), "got {body}");
 }
 
 #[tokio::test]
@@ -301,7 +326,7 @@ async fn an_unknown_host_falls_back_to_prefix_routing() {
 
     let (status, body, _) = get_with_host(f, "/trip/", "some-mac.local").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "<h1>home</h1>");
+    assert!(served(&body, "<h1>home</h1>"), "got {body}");
 }
 
 #[tokio::test]

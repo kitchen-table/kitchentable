@@ -71,6 +71,23 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE devices ADD COLUMN named_by TEXT NOT NULL DEFAULT 'guess';
     "#,
+    // 4: the Danger zone. An app can be taken offline without being deleted,
+    // and it can be forgotten without its folder being touched.
+    r#"
+    ALTER TABLE apps ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+
+    -- Folders the owner told Kitchen Table to forget.
+    --
+    -- Keyed by path rather than slug because the slug is derived from the
+    -- folder and a forgotten app has no record left to derive it from. Kept
+    -- here rather than in the folder's own app.json because "Kitchen Table
+    -- forgets it" is a fact about Kitchen Table, and the promise made in the
+    -- window is that the folder on disk is left alone.
+    CREATE TABLE forgotten (
+        path        TEXT PRIMARY KEY,
+        forgotten_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

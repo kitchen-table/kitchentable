@@ -42,13 +42,15 @@ function asDaemonError(raw: unknown): DaemonError {
 }
 
 /**
- * Polling rather than a subscription, for now.
+ * A safety net, not the mechanism.
  *
- * The daemon's push events exist in the protocol but not yet on the wire, and
- * over a local socket a two-second poll is cheaper than the machinery to avoid
- * it. Swapped for `event.*` subscriptions when they land.
+ * `event.subscribe` is what keeps these current now, so this is only here for
+ * what a subscription cannot cover: the seconds between the daemon going away
+ * and the shell noticing, and anything a lagging subscriber dropped. Minutes
+ * rather than seconds, because a poll this slow costs nothing and a poll fast
+ * enough to matter would mean the events were not working.
  */
-const POLL_MS = 2000;
+const POLL_MS = 60_000;
 
 export function useHealth() {
   return useQuery({

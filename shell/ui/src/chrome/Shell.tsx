@@ -6,6 +6,7 @@ import { AppDetail } from "../surfaces/AppDetail";
 import { quit } from "../daemon";
 import { useAddApp, useFolderDrop } from "../addApp";
 import { pending as pendingDevices, useDevices } from "../devices";
+import { useDaemonEvents } from "../events";
 import { LIBRARY, type Surface } from "../navigation";
 import { useAppearance } from "../theme";
 import { NewAppModal } from "./NewAppModal";
@@ -36,6 +37,10 @@ export function Shell({
   const [dismissed, setDismissed] = useState<string[]>([]);
   const { dark, toggle } = useAppearance();
   const { create, importFolder, pick } = useAddApp();
+
+  // Mounted here rather than per-surface: an event that arrives while the
+  // Devices tab is closed still has to reach the pairing prompt.
+  useDaemonEvents();
 
   const devices = useDevices();
   const waiting = pendingDevices(devices.data);

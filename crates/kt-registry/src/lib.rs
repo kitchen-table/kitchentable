@@ -168,6 +168,7 @@ impl Registry {
             entry: choose_entry(folder),
             visibility: Visibility::Private,
             version: 1,
+            paused: false,
             extra: serde_json::Map::new(),
         };
 

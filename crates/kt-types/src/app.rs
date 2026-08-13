@@ -63,6 +63,14 @@ pub struct AppManifest {
     /// Owned by the daemon; incremented on deploy.
     #[serde(default)]
     pub version: u32,
+    /// Taken offline by the owner, without being forgotten.
+    ///
+    /// Lives in the manifest beside `visibility` because it is the same kind
+    /// of fact - a decision about who may open this, made by the owner - and
+    /// because it has to outlive a restart. A paused app stays in the library,
+    /// keeps its links and its devices, and simply does not answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
     /// Unknown keys are preserved verbatim so a manifest written by a newer
     /// daemon survives a round-trip through an older one.
     #[serde(flatten)]
@@ -133,6 +141,7 @@ impl AppRecord {
             entry: m.entry.clone(),
             visibility: m.visibility,
             version: m.version,
+            paused: m.paused,
             url: match &urls.hostname {
                 Some(host) => format!("{}://{host}{}", urls.scheme, urls.port_suffix),
                 None => prefix_url.clone(),
@@ -179,6 +188,10 @@ pub struct App {
     pub entry: String,
     pub visibility: Visibility,
     pub version: u32,
+    /// Taken offline by the owner. Still listed, still shared with the same
+    /// people, but answering nobody until it is resumed.
+    #[serde(default)]
+    pub paused: bool,
     /// Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
     /// prefix URL when nothing was announced.
     pub url: String,
@@ -228,6 +241,7 @@ mod tests {
                 entry: "index.html".into(),
                 visibility: Visibility::Private,
                 version: 1,
+                paused: false,
                 extra: serde_json::Map::new(),
             },
             path: "/ws/trip".into(),

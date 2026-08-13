@@ -71,6 +71,7 @@ impl Library {
             };
 
             let served = ServedApp {
+                paused: record.manifest.paused,
                 slug: record.manifest.slug.clone(),
                 name: record.manifest.name.clone(),
                 root,
@@ -192,6 +193,7 @@ mod tests {
                 entry: "index.html".into(),
                 visibility: Visibility::Private,
                 version: 1,
+                paused: false,
                 extra: serde_json::Map::new(),
             },
             path.into(),

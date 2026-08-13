@@ -21,6 +21,7 @@ const welcomeApp: App = {
   entry: "index.html",
   visibility: "private",
   version: 1,
+  paused: false,
   url: "http://welcome.local",
   fallback_url: "http://192.168.0.5/welcome",
   path: "/ws/Welcome",

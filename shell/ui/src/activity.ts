@@ -17,40 +17,77 @@ export interface AccessEvent {
   detail?: string | null;
 }
 
-/** How each action reads in a list: a glyph, a colour, and a sentence. */
+/**
+ * How each action reads in a list: a glyph, a colour, and two forms of words.
+ *
+ * `title` stands alone. `phrase` completes a sentence about whoever caused it -
+ * "Kitchen iPad opened the app" - which is the form the mockup uses, because a
+ * column of the bare word "Opened" answers the least interesting half of the
+ * question. Keep the keys in step with what the daemon actually writes; a
+ * missing one falls through to [`describe`] and shows up as a raw lowercase
+ * verb next to a meaningless dot.
+ */
 export const ACTION: Record<
   string,
-  { glyph: string; colour: string; tint: string; title: string }
+  { glyph: string; colour: string; tint: string; title: string; phrase: string }
 > = {
   opened: {
     glyph: "→",
     colour: "var(--accent)",
     tint: "var(--accent-tint)",
     title: "Opened",
+    phrase: "opened the app",
+  },
+  // Someone opened an invite link and is waiting on the owner. Written by
+  // redemption, and the row that explains why a prompt appeared.
+  requested: {
+    glyph: "?",
+    colour: "var(--gold)",
+    tint: "var(--gold-tint)",
+    title: "Asked to be let in",
+    phrase: "asked to be let in",
   },
   paired: {
     glyph: "✓",
     colour: "var(--green)",
     tint: "var(--green-tint)",
     title: "Device paired",
+    phrase: "was let in",
   },
+  // The owner said no to a pairing request. Rarer than `refused`, and a
+  // deliberate act rather than a rule being applied.
   denied: {
     glyph: "✕",
     colour: "var(--danger)",
     tint: "var(--danger-tint)",
-    title: "Refused",
+    title: "Denied",
+    phrase: "was denied",
+  },
+  // The gate turned a request away. This is the common negative event - every
+  // blocked open writes one - and it had no entry here at all, so it rendered
+  // as the raw word "refused" beside a dot.
+  refused: {
+    glyph: "✕",
+    colour: "var(--danger)",
+    tint: "var(--danger-tint)",
+    title: "Turned away",
+    phrase: "was turned away",
   },
   revoked: {
     glyph: "⊘",
     colour: "var(--gold)",
     tint: "var(--gold-tint)",
     title: "Access revoked",
+    phrase: "had access revoked",
   },
+  // Nothing writes this yet; it arrives with versioning in D6. Kept because
+  // the glyph and wording are settled, and an entry costs nothing until then.
   deployed: {
     glyph: "↑",
     colour: "var(--strict)",
     tint: "var(--strict-tint)",
     title: "Deployed",
+    phrase: "deployed a new version",
   },
 };
 
@@ -61,8 +98,38 @@ export function describe(action: string) {
       colour: "var(--muted)",
       tint: "var(--chip)",
       title: action,
+      phrase: action,
     }
   );
+}
+
+/**
+ * What to call whoever caused an event.
+ *
+ * The device name when we know it, because that is what the owner recognises -
+ * they named it themselves at the pairing prompt. Falling back to the actor
+ * rather than the device id: "Someone" is vague but true, and a base64 id in a
+ * sentence is neither.
+ */
+export function who(event: AccessEvent, deviceName?: string): string {
+  if (deviceName) return deviceName;
+  switch (event.actor) {
+    case "owner":
+      return "You";
+    case "agent":
+      return "An agent";
+    case "cli":
+      return "The CLI";
+    case "system":
+      return "Kitchen Table";
+    default:
+      return "Someone";
+  }
+}
+
+/** "Kitchen iPad opened the app". The row title the mockup draws. */
+export function sentence(event: AccessEvent, deviceName?: string): string {
+  return `${who(event, deviceName)} ${describe(event.action).phrase}`;
 }
 
 /** The activity filters the mockup puts above the per-app list. */

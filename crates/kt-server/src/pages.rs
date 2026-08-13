@@ -96,6 +96,24 @@ pub fn interstitial(app_name: &str, owner_hint: &str) -> String {
 
 /// The owner said no, or the device was revoked. A dead end, said kindly and
 /// without implying the viewer did something wrong.
+/// The owner took it offline.
+///
+/// Says so plainly and says it is temporary. A viewer who gets "not available"
+/// assumes they are unwelcome and asks the owner about it; the truth is that
+/// nothing is wrong with them and the app is coming back.
+pub fn paused(app_name: &str) -> String {
+    page(
+        app_name,
+        &format!(
+            r#"<h1>Paused</h1>
+<p>{app} has been paused by whoever shares it.</p>
+<p class="small">Your link still works. Try again once it is back.</p>"#,
+            app = escape(app_name)
+        ),
+        None,
+    )
+}
+
 pub fn denied(app_name: &str) -> String {
     page(
         app_name,
