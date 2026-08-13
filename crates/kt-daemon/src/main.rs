@@ -115,22 +115,7 @@ async fn run() -> Result<(), StartupError> {
     // support asks for; the private half stays inside the identity.
     let install_key = keys.install.as_ref().map(|i| i.public().to_string());
 
-    // Dial the relay, if this install has one and knows who it is.
-    //
-    // Spawned and never awaited: serving on the local network must not wait on
-    // a network dial, and must not stop because one failed. A daemon with no
-    // relay is not a degraded daemon - it is the free tier.
-    match (relay::Config::from_env(), keys.install.clone()) {
-        (Some(config), Some(identity)) => {
-            tracing::info!(url = config.url, "relay configured; dialling");
-            tokio::spawn(relay::run(config, identity));
-        }
-        (Some(_), None) => tracing::warn!(
-            "a relay is configured but this install has no identity, so there \
-             is nothing to dial with; see the keystore warnings above"
-        ),
-        (None, _) => {}
-    }
+    let relay_identity = keys.install.clone();
     let trust = Arc::new(trust::Trust::new(
         Arc::clone(&store),
         keys.session,
@@ -274,8 +259,30 @@ async fn run() -> Result<(), StartupError> {
         "kitchen table is serving"
     );
 
+    let app = kt_server::router(library, trust, presence_for_http);
+
+    // Dial the relay, if this install has one and knows who it is.
+    //
+    // Spawned and never awaited: serving on the local network must not wait on
+    // a network dial, and must not stop because one failed. A daemon with no
+    // relay is not a degraded daemon - it is the free tier.
+    //
+    // It gets the same router the LAN listener uses, so a relayed request meets
+    // the same gate rather than a second implementation of one. What it does
+    // not get is connect info: see relay::session.
+    match (relay::Config::from_env(), relay_identity) {
+        (Some(config), Some(identity)) => {
+            tracing::info!(url = config.url, "relay configured; dialling");
+            tokio::spawn(relay::run(config, identity, Arc::new(app.clone())));
+        }
+        (Some(_), None) => tracing::warn!(
+            "a relay is configured but this install has no identity, so there \
+             is nothing to dial with; see the keystore warnings above"
+        ),
+        (None, _) => {}
+    }
+
     let http = tokio::spawn(async move {
-        let app = kt_server::router(library, trust, presence_for_http);
         // with_connect_info, or the peer address never reaches the gate and
         // the owner's own browser would be asked to pair with itself.
         let service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();

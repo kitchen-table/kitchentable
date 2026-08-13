@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum = "0.8.9"
+bytes = "1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 getrandom = "0.4.3"
 kt-auth = { version = "0.1.0", path = "../kt-auth" }
@@ -24,9 +25,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tower = { version = "0.5", features = ["util"] }
+yamux = "0.14.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+tokio-util = { version = "0.7", features = ["compat"] }
 kt-auth = { path = "../kt-auth" }
 kt-mdns = { path = "../kt-mdns" }
