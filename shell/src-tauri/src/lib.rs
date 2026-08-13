@@ -147,6 +147,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // The folder picker behind "Add an app". Picking a folder is the one
+        // thing the daemon cannot do for itself: it has no window to put a
+        // native panel on.
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             supervisor: Arc::clone(&supervisor),
         })

@@ -12,15 +12,17 @@ import { Modal, ModalActions, ModalButton, ModalHeading } from "./Modal";
  */
 export function NewAppModal({
   workspace,
+  dropping,
   onCreate,
+  onPick,
   onClose,
 }: {
   workspace?: string;
-  /**
-   * Creates an empty app in the workspace. Absent until `app.create` is on the
-   * socket, in which case the dialog explains the drop instead of pretending.
-   */
-  onCreate?: (name: string) => Promise<unknown>;
+  /** True while a dropped folder is being copied in. */
+  dropping?: boolean;
+  onCreate: (name: string) => Promise<unknown>;
+  /** Opens the native folder picker. Resolves to null if cancelled. */
+  onPick: () => Promise<unknown | null>;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
@@ -28,19 +30,25 @@ export function NewAppModal({
   const [error, setError] = useState<string | null>(null);
 
   const slug = slugify(name);
+  const working = busy || dropping === true;
 
-  async function create() {
-    if (!onCreate || !slug) return;
+  async function run(action: () => Promise<unknown>, closeOnNull = false) {
     setBusy(true);
     setError(null);
     try {
-      await onCreate(name.trim());
-      onClose();
+      const result = await action();
+      // The picker resolves to null when it is cancelled, which is not a
+      // success to close on.
+      if (result !== null || closeOnNull) onClose();
+      else setBusy(false);
     } catch (raw) {
-      setError(raw instanceof Error ? raw.message : String(raw));
+      setError(message(raw));
       setBusy(false);
     }
   }
+
+  const create = () => (slug ? run(() => onCreate(name.trim()), true) : undefined);
+  const pick = () => run(onPick);
 
   return (
     <Modal title="Add an app" onClose={onClose}>
@@ -48,16 +56,24 @@ export function NewAppModal({
         Any folder becomes an app automatically. No config required to start.
       </ModalHeading>
 
-      <div
+      <button
+        type="button"
+        onClick={pick}
+        disabled={working}
         style={{
-          border: "2px dashed var(--dash)",
+          display: "block",
+          width: "100%",
+          border: `2px dashed ${dropping ? "var(--accent)" : "var(--dash)"}`,
+          background: dropping ? "var(--accent-tint)" : "transparent",
           borderRadius: 14,
           padding: 34,
           textAlign: "center",
           marginBottom: 16,
+          cursor: working ? "wait" : "pointer",
+          transition: "border-color .15s, background .15s",
         }}
       >
-        <div
+        <span
           aria-hidden="true"
           style={{
             width: 44,
@@ -73,26 +89,36 @@ export function NewAppModal({
           }}
         >
           ＋
-        </div>
-        <div style={{ font: "600 14px var(--font-sans)", marginBottom: 4 }}>
-          Drop a folder into your workspace
-        </div>
-        <div style={{ font: "400 12px var(--font-mono)", color: "var(--muted)" }}>
-          HTML, CSS, JS, PDFs, images
-        </div>
+        </span>
+        <span
+          style={{
+            display: "block",
+            font: "600 14px var(--font-sans)",
+            color: "var(--ink)",
+            marginBottom: 4,
+          }}
+        >
+          {dropping ? "Copying it in…" : "Drop a folder here"}
+        </span>
+        <span
+          style={{ display: "block", font: "400 12px var(--font-mono)", color: "var(--muted)" }}
+        >
+          or click to choose · HTML, CSS, JS, PDFs, images
+        </span>
         {workspace && (
-          <div
+          <span
             style={{
+              display: "block",
               marginTop: 10,
               font: "400 11px var(--font-mono)",
               color: "var(--faint)",
               wordBreak: "break-all",
             }}
           >
-            {workspace}
-          </div>
+            copied into {workspace}
+          </span>
         )}
-      </div>
+      </button>
 
       <label style={{ display: "block", marginBottom: 16 }}>
         <span
@@ -114,7 +140,7 @@ export function NewAppModal({
             if (event.key === "Enter") void create();
           }}
           placeholder="Packing list"
-          disabled={!onCreate || busy}
+          disabled={working}
           style={{
             width: "100%",
             border: "1px solid var(--border2)",
@@ -170,14 +196,26 @@ export function NewAppModal({
         <ModalButton
           variant="primary"
           onClick={() => void create()}
-          disabled={!onCreate || !slug || busy}
-          title={onCreate ? undefined : "Creating apps from here is not wired up yet"}
+          disabled={!slug || working}
+          title={slug ? undefined : "Give the app a name first"}
         >
-          {busy ? "Adding…" : "Add app"}
+          {working ? "Adding…" : "Add app"}
         </ModalButton>
       </ModalActions>
     </Modal>
   );
+}
+
+/**
+ * Daemon errors arrive as `{code, message}` rather than as an `Error`, and the
+ * message is already written for a person - "Trip Planner is already in your
+ * workspace" - so it is shown as-is.
+ */
+function message(raw: unknown): string {
+  if (typeof raw === "object" && raw !== null && "message" in raw) {
+    return String((raw as { message: unknown }).message);
+  }
+  return raw instanceof Error ? raw.message : String(raw);
 }
 
 function Key({ children }: { children: React.ReactNode }) {

@@ -25,7 +25,17 @@ pub struct Context {
     pub urls: Urls,
     pub serving: ServingState,
     pub started: Instant,
+    /// Rescan the workspace now, rather than waiting for the watcher to settle.
+    ///
+    /// Creating an app has to answer with the app it created, and the watcher's
+    /// debounce is measured in the time it takes someone to finish copying a
+    /// folder - far too long to block a socket call on.
+    pub rescan: Rescan,
 }
+
+/// Boxed so the daemon can hand in the real rescan closure and tests a no-op,
+/// without either of them appearing in this module's signatures.
+pub type Rescan = Arc<dyn Fn() + Send + Sync>;
 
 impl Context {
     /// URLs for one app, with its announced hostname filled in.
@@ -62,6 +72,24 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             let slug = string_param(request, "slug")?;
             let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
             json(&record.to_app(&ctx.urls_for(&slug)))
+        }
+
+        // ---- authoring ------------------------------------------------
+        "app.create" => {
+            let name = string_param(request, "name")?;
+            let folder = crate::authoring::create(std::path::Path::new(&ctx.workspace), &name)
+                .map_err(author_error)?;
+            created(ctx, &folder)
+        }
+
+        "app.import" => {
+            let path = string_param(request, "path")?;
+            let folder = crate::authoring::import(
+                std::path::Path::new(&ctx.workspace),
+                std::path::Path::new(&path),
+            )
+            .map_err(author_error)?;
+            created(ctx, &folder)
         }
 
         // ---- sharing --------------------------------------------------
@@ -192,7 +220,57 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
     }
 }
 
-fn now() -> i64 {
+/// Rescan, then answer with the app that appeared at `folder`.
+///
+/// Matching on path rather than on a slug we guessed: the registry owns
+/// slugging, including how it resolves a collision, and guessing here would be
+/// a second implementation of that rule waiting to disagree with the first.
+fn created(ctx: &Context, folder: &std::path::Path) -> Result<serde_json::Value, KtError> {
+    (ctx.rescan)();
+
+    let wanted = folder.canonicalize();
+    let record = ctx.library.records().into_iter().find(|record| {
+        let path = std::path::Path::new(&record.path);
+        match (&wanted, path.canonicalize()) {
+            (Ok(a), Ok(b)) => *a == b,
+            _ => path == folder,
+        }
+    });
+
+    match record {
+        Some(record) => {
+            let slug = record.manifest.slug.clone();
+            json(&record.to_app(&ctx.urls_for(&slug)))
+        }
+        // The folder is on disk but the registry did not take it - almost
+        // always an app.json the user cannot see being rejected. Saying so
+        // beats a success that leaves nothing in the library.
+        None => Err(KtError {
+            code: ErrorCode::Internal,
+            message: format!(
+                "created {} but it did not appear in the library",
+                folder.display()
+            ),
+            detail: None,
+        }),
+    }
+}
+
+fn author_error(e: crate::authoring::AuthorError) -> KtError {
+    use crate::authoring::AuthorError::*;
+    KtError {
+        // Everything except a failed write is the caller handing us something
+        // we cannot use, which is theirs to fix.
+        code: match e {
+            Io { .. } => ErrorCode::Internal,
+            _ => ErrorCode::BadRequest,
+        },
+        message: e.to_string(),
+        detail: None,
+    }
+}
+
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -385,6 +463,8 @@ mod tests {
             },
             serving: ServingState::Serving,
             started: Instant::now(),
+            // Nothing to rescan: these tests drive the library directly.
+            rescan: std::sync::Arc::new(|| {}),
         }
     }
 
