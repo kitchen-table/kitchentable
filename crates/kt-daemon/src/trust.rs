@@ -13,6 +13,9 @@ use kt_store::{AccessEvent, Store};
 pub struct Trust {
     store: Arc<Store>,
     keys: Arc<SessionKeys>,
+    /// Asks the network what a device calls itself. Used once per device, off
+    /// the request path, purely to suggest a better name than the user agent.
+    discoverer: Arc<dyn kt_mdns::Discoverer>,
     /// Whether this machine is on a network the owner marked as home.
     ///
     /// Fixed for now. Remembering networks by gateway fingerprint is the next
@@ -24,11 +27,55 @@ pub struct Trust {
 
 impl Trust {
     pub fn new(store: Arc<Store>, keys: Arc<SessionKeys>) -> Self {
+        Self::with_discoverer(
+            store,
+            keys,
+            Arc::from(kt_mdns::discoverer_for_this_platform()),
+        )
+    }
+
+    pub fn with_discoverer(
+        store: Arc<Store>,
+        keys: Arc<SessionKeys>,
+        discoverer: Arc<dyn kt_mdns::Discoverer>,
+    ) -> Self {
         Self {
             store,
             keys,
+            discoverer,
             household: true,
         }
+    }
+
+    /// Ask the network for this device's own name, and adopt it if it answers.
+    ///
+    /// On its own thread because the lookup takes up to a few seconds when
+    /// nothing replies, and the caller is an HTTP handler with a phone waiting
+    /// on the other end of it. The name lands before the owner reaches the
+    /// prompt in practice, and if it does not, the prompt shows the guess -
+    /// which is what it showed before any of this existed.
+    fn discover_name(&self, id: DeviceId, peer: Option<std::net::IpAddr>) {
+        let Some(std::net::IpAddr::V4(addr)) = peer else {
+            return;
+        };
+        if addr.is_loopback() || !self.discoverer.is_live() {
+            return;
+        }
+
+        let discoverer = Arc::clone(&self.discoverer);
+        let store = Arc::clone(&self.store);
+        std::thread::spawn(move || {
+            let Some(name) = discoverer.name_for(addr, kt_mdns::NAME_LOOKUP_BUDGET) else {
+                return;
+            };
+            // `set_discovered_name` only replaces a guess, so an owner who
+            // typed a name while this was in flight is not overwritten.
+            match store.set_discovered_name(&id, &name) {
+                Ok(true) => tracing::info!(device = id.as_str(), name, "device named itself"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "could not store the discovered name"),
+            }
+        });
     }
 
     fn now() -> i64 {
@@ -127,13 +174,20 @@ impl TrustSource for Trust {
         })
     }
 
-    fn request_access(&self, headers: &HeaderMap, slug: &str) -> Redemption {
+    fn request_access(
+        &self,
+        headers: &HeaderMap,
+        slug: &str,
+        peer: Option<std::net::IpAddr>,
+    ) -> Redemption {
         let (device, cookie) = self.identify(headers);
 
-        // Only log the first ask. The wait page refreshes every few seconds,
-        // and an access log full of one viewer waiting is unreadable.
+        // Only log the first ask, and only look the name up once. The wait page
+        // refreshes every few seconds: an access log full of one viewer waiting
+        // is unreadable, and a lookup per refresh would hammer the network.
         if cookie.is_some() {
             self.log(slug, Some(&device.id), "requested");
+            self.discover_name(device.id.clone(), peer);
         }
 
         Redemption {
@@ -365,7 +419,7 @@ mod tests {
         // The wait page reloads every few seconds; logging each one would bury
         // everything else in the activity feed.
         let trust = trust();
-        let first = trust.request_access(&HeaderMap::new(), "trip");
+        let first = trust.request_access(&HeaderMap::new(), "trip", None);
 
         let mut headers = HeaderMap::new();
         let value = first
@@ -378,7 +432,7 @@ mod tests {
         headers.insert(header::COOKIE, value.parse().expect("valid"));
 
         for _ in 0..5 {
-            trust.request_access(&headers, "trip");
+            trust.request_access(&headers, "trip", None);
         }
 
         let events = trust.store.recent_access(Some("trip"), 50).expect("reads");

@@ -53,12 +53,32 @@ pub enum DeviceStatus {
     Owner,
 }
 
+/// Where a device's name came from.
+///
+/// The order matters: a stronger source may overwrite a weaker one, never the
+/// other way round. Nothing overwrites what the owner typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedBy {
+    /// Guessed from the user agent: a model class at best, and wrong on an
+    /// iPad in desktop mode.
+    #[default]
+    Guess,
+    /// The name the device publishes for itself on the local network.
+    Network,
+    /// Typed by the owner. Final.
+    Owner,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub id: DeviceId,
     /// Something a person recognises: "Kitchen iPad". Suggested from the
-    /// user agent at approval time and editable afterwards.
+    /// user agent, improved by the network where it answers, and editable.
     pub name: String,
+    /// Where `name` came from, so a later lookup never overwrites the owner.
+    #[serde(default)]
+    pub named_by: NamedBy,
     pub status: DeviceStatus,
     /// What the browser said it was, kept for the approval prompt.
     pub user_agent: String,
@@ -74,6 +94,7 @@ impl Device {
         Self {
             fingerprint: fingerprint(&id),
             name: suggest_name(user_agent),
+            named_by: NamedBy::Guess,
             id,
             status: DeviceStatus::Pending,
             user_agent: user_agent.to_string(),
@@ -92,6 +113,7 @@ impl Device {
             fingerprint: "aa:bb:cc".into(),
             first_seen: 0,
             last_seen: 0,
+            named_by: NamedBy::Guess,
         }
     }
 }

@@ -65,6 +65,12 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX access_log_at_idx ON access_log(at DESC);
     CREATE INDEX access_log_app_idx ON access_log(app_slug, at DESC);
     "#,
+    // 3: where a device's name came from, so the owner's own wording is never
+    // overwritten by a later network lookup, and the pairing prompt can say
+    // whether the name is the device's or our guess.
+    r#"
+    ALTER TABLE devices ADD COLUMN named_by TEXT NOT NULL DEFAULT 'guess';
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

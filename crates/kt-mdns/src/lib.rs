@@ -7,15 +7,20 @@
 //! the attribution wrong (docs/architecture.md section 10).
 
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 mod bonjour;
+#[cfg(target_os = "macos")]
+mod discover;
 mod mock;
 
-pub use mock::{MockAnnouncer, UnsupportedAnnouncer};
+pub use mock::{MockAnnouncer, MockDiscoverer, NoDiscoverer, UnsupportedAnnouncer};
 
 #[cfg(target_os = "macos")]
 pub use bonjour::BonjourAnnouncer;
+#[cfg(target_os = "macos")]
+pub use discover::BonjourDiscoverer;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MdnsError {
@@ -79,6 +84,49 @@ pub trait Announcer: Send + Sync {
     /// resolve.
     fn is_live(&self) -> bool {
         true
+    }
+}
+
+/// Asks the network what the device at an address calls itself.
+///
+/// Separate from [`Announcer`] because they are opposite directions and have
+/// different costs: announcing is cheap and permanent, asking is slow and
+/// happens once, when someone is waiting to be let in.
+///
+/// The answer is a *suggestion for a name*, never an identity. Matching is by
+/// IP, which the device asserts; nothing is authorised on the strength of it,
+/// and the owner reads and edits the name before approving anything.
+pub trait Discoverer: Send + Sync {
+    /// The name the device at `addr` publishes for itself, if any.
+    ///
+    /// Must return within roughly `within`. Callers run this off any path a
+    /// person is waiting on - a phone sitting on the pairing page must not be
+    /// held up by a lookup about itself.
+    fn name_for(&self, addr: Ipv4Addr, within: Duration) -> Option<String>;
+
+    /// Whether this implementation can really see the network. False for the
+    /// no-op one, so callers can skip the wait entirely.
+    fn is_live(&self) -> bool {
+        true
+    }
+}
+
+/// How long a name lookup may take before the guess is used instead.
+///
+/// Generous because it is off the request path and only runs when someone is
+/// about to be asked a question; short enough that the pairing prompt is not
+/// visibly waiting on it.
+pub const NAME_LOOKUP_BUDGET: Duration = Duration::from_secs(4);
+
+/// The discoverer for this platform, or a no-op one where there is none.
+pub fn discoverer_for_this_platform() -> Box<dyn Discoverer> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(BonjourDiscoverer)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(NoDiscoverer)
     }
 }
 

@@ -3,7 +3,7 @@
 //! Split from the app storage because it answers a different question: not
 //! "what is here" but "who may see it, and who has".
 
-use kt_auth::{Device, DeviceId, DeviceStatus, Invite, InvitePolicy, InviteToken};
+use kt_auth::{Device, DeviceId, DeviceStatus, Invite, InvitePolicy, InviteToken, NamedBy};
 use rusqlite::{params, OptionalExtension};
 
 use crate::{Store, StoreError};
@@ -26,10 +26,9 @@ impl Store {
 
     pub fn upsert_device(&self, device: &Device) -> Result<(), StoreError> {
         self.lock().execute(
-            "INSERT INTO devices (id, name, status, user_agent, fingerprint, first_seen, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO devices (id, name, status, user_agent, fingerprint, first_seen, last_seen, named_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
                 status = excluded.status,
                 user_agent = excluded.user_agent,
                 last_seen = excluded.last_seen",
@@ -41,6 +40,7 @@ impl Store {
                 device.fingerprint,
                 device.first_seen,
                 device.last_seen,
+                named_by_str(device.named_by),
             ],
         )?;
         Ok(())
@@ -49,7 +49,7 @@ impl Store {
     pub fn get_device(&self, id: &DeviceId) -> Result<Option<Device>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, status, user_agent, fingerprint, first_seen, last_seen
+            "SELECT id, name, status, user_agent, fingerprint, first_seen, last_seen, named_by
              FROM devices WHERE id = ?1",
         )?;
         stmt.query_row(params![id.as_str()], |row| Ok(row_to_device(row)))
@@ -60,7 +60,7 @@ impl Store {
     pub fn list_devices(&self) -> Result<Vec<Device>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, status, user_agent, fingerprint, first_seen, last_seen
+            "SELECT id, name, status, user_agent, fingerprint, first_seen, last_seen, named_by
              FROM devices ORDER BY last_seen DESC",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_device(row)))?;
@@ -83,9 +83,26 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// The owner naming a device. Final: nothing overwrites this afterwards.
     pub fn rename_device(&self, id: &DeviceId, name: &str) -> Result<bool, StoreError> {
         let n = self.lock().execute(
-            "UPDATE devices SET name = ?2 WHERE id = ?1",
+            "UPDATE devices SET name = ?2, named_by = 'owner' WHERE id = ?1",
+            params![id.as_str(), name],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The network answering with the name a device publishes for itself.
+    ///
+    /// Only replaces a guess. The lookup is slow and lands whenever it lands,
+    /// so without the `named_by = 'guess'` guard it could arrive after the
+    /// owner has already typed something and quietly undo them.
+    ///
+    /// Returns whether the name actually changed.
+    pub fn set_discovered_name(&self, id: &DeviceId, name: &str) -> Result<bool, StoreError> {
+        let n = self.lock().execute(
+            "UPDATE devices SET name = ?2, named_by = 'network'
+             WHERE id = ?1 AND named_by = 'guess'",
             params![id.as_str(), name],
         )?;
         Ok(n > 0)
@@ -246,7 +263,26 @@ fn row_to_device(row: &rusqlite::Row<'_>) -> Result<Device, StoreError> {
         fingerprint: row.get(4)?,
         first_seen: row.get(5)?,
         last_seen: row.get(6)?,
+        named_by: named_by_from_str(&row.get::<_, String>(7).unwrap_or_default()),
     })
+}
+
+fn named_by_str(source: NamedBy) -> &'static str {
+    match source {
+        NamedBy::Guess => "guess",
+        NamedBy::Network => "network",
+        NamedBy::Owner => "owner",
+    }
+}
+
+/// Anything unrecognised is treated as a guess, which is the weakest source -
+/// so a corrupt value can only ever be improved on, never entrench itself.
+fn named_by_from_str(raw: &str) -> NamedBy {
+    match raw {
+        "network" => NamedBy::Network,
+        "owner" => NamedBy::Owner,
+        _ => NamedBy::Guess,
+    }
 }
 
 fn row_to_invite(row: &rusqlite::Row<'_>) -> Result<Invite, StoreError> {
@@ -520,5 +556,93 @@ mod tests {
                 .expect("logs");
         }
         assert_eq!(store.recent_access(None, 10).expect("reads").len(), 10);
+    }
+}
+
+#[cfg(test)]
+mod naming {
+    use super::*;
+    use crate::Store;
+
+    fn store_with_device() -> (Store, DeviceId) {
+        let store = Store::in_memory().expect("opens");
+        let device = Device::pending(
+            DeviceId::parse("AAAAAAAAAAAAAAAAAAAAAA").expect("valid id"),
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/605.1",
+            1_000,
+        );
+        store.upsert_device(&device).expect("stores");
+        (store, device.id)
+    }
+
+    #[test]
+    fn a_new_device_is_named_by_guesswork() {
+        let (store, id) = store_with_device();
+        let device = store.get_device(&id).expect("reads").expect("exists");
+
+        assert_eq!(device.name, "iPhone");
+        assert_eq!(device.named_by, NamedBy::Guess);
+    }
+
+    #[test]
+    fn the_network_improves_on_a_guess() {
+        let (store, id) = store_with_device();
+
+        assert!(store
+            .set_discovered_name(&id, "Kitchen iPad")
+            .expect("sets"));
+
+        let device = store.get_device(&id).expect("reads").expect("exists");
+        assert_eq!(device.name, "Kitchen iPad");
+        assert_eq!(device.named_by, NamedBy::Network);
+    }
+
+    #[test]
+    fn the_network_never_overwrites_the_owner() {
+        // The lookup takes seconds and lands whenever it lands. Without this,
+        // an answer arriving after the owner typed a name would undo them.
+        let (store, id) = store_with_device();
+        store.rename_device(&id, "Upstairs iPad").expect("renames");
+
+        assert!(!store
+            .set_discovered_name(&id, "Kitchen iPad")
+            .expect("does not set"));
+
+        let device = store.get_device(&id).expect("reads").expect("exists");
+        assert_eq!(device.name, "Upstairs iPad");
+        assert_eq!(device.named_by, NamedBy::Owner);
+    }
+
+    #[test]
+    fn the_owner_may_overwrite_the_network() {
+        let (store, id) = store_with_device();
+        store
+            .set_discovered_name(&id, "Kitchen iPad")
+            .expect("sets");
+        store
+            .rename_device(&id, "The one in the hall")
+            .expect("renames");
+
+        let device = store.get_device(&id).expect("reads").expect("exists");
+        assert_eq!(device.name, "The one in the hall");
+        assert_eq!(device.named_by, NamedBy::Owner);
+    }
+
+    #[test]
+    fn seeing_a_device_again_does_not_reset_its_name() {
+        // A viewer refreshing the wait page upserts the device on every hit.
+        let (store, id) = store_with_device();
+        store.rename_device(&id, "Upstairs iPad").expect("renames");
+
+        let mut seen_again = store.get_device(&id).expect("reads").expect("exists");
+        seen_again.name = "iPhone".into();
+        seen_again.named_by = NamedBy::Guess;
+        seen_again.last_seen = 2_000;
+        store.upsert_device(&seen_again).expect("upserts");
+
+        let device = store.get_device(&id).expect("reads").expect("exists");
+        assert_eq!(device.name, "Upstairs iPad", "the owner's name survived");
+        assert_eq!(device.named_by, NamedBy::Owner);
+        assert_eq!(device.last_seen, 2_000, "but it was still seen");
     }
 }

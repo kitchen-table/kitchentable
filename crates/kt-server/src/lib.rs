@@ -70,7 +70,17 @@ pub trait TrustSource: Send + Sync + 'static {
 
     /// Note that a device asked for an app it cannot open yet, so the owner
     /// gets an approval prompt.
-    fn request_access(&self, headers: &axum::http::HeaderMap, slug: &str) -> Redemption;
+    ///
+    /// `peer` is where the request came from. It is passed so the daemon can
+    /// ask the network what that device calls itself - a far better suggested
+    /// name than the user agent - and for nothing else. Nothing is authorised
+    /// on the strength of an address the device asserts.
+    fn request_access(
+        &self,
+        headers: &axum::http::HeaderMap,
+        slug: &str,
+        peer: Option<std::net::IpAddr>,
+    ) -> Redemption;
 
     /// Record an access-log line.
     fn log(&self, slug: &str, device: Option<&kt_auth::DeviceId>, action: &str);
@@ -266,7 +276,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
             serve_app(app, path).await
         }
         gate::Gated::Waiting => {
-            let redemption = state.trust.request_access(headers, &app.slug);
+            let redemption = state.trust.request_access(headers, &app.slug, peer.0);
             let mut response = html(pages::waiting(&app.name, &state.trust.owner_hint()));
             if let Some(cookie) = redemption.cookie {
                 if let Ok(value) = cookie.parse() {
