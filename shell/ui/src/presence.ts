@@ -32,9 +32,22 @@ export function usePresence(slug: string, enabled = true) {
  * the pairing prompt and what they will recognise.
  */
 export function viewerName(viewer: Viewer, deviceNames: Map<string, string>): string {
-  if (viewer.device_id === OWNER) return "This machine";
-  return deviceNames.get(viewer.device_id) ?? "Someone";
+  // Tolerant of a missing id for the same reason as `viewerWhere`: this is one
+  // line in a panel, and throwing would blank the whole app detail view.
+  const id = viewer.device_id ?? "";
+  if (id === OWNER || id === "") return "This machine";
+  const named = deviceNames.get(id);
+  if (named) return named;
+  // A Household app lets anyone on the network in without pairing, so its
+  // readers often have no device to name. The address is what tells two phones
+  // in the same house apart, and it is what the pairing prompt would show
+  // anyway if they ever asked for something that needed approval.
+  const address = id.startsWith(ANONYMOUS) ? id.slice(ANONYMOUS.length) : null;
+  return address ? `Someone at ${address}` : "Someone";
 }
+
+/** Prefix the daemon uses for a viewer it knows only by address. */
+const ANONYMOUS = "at:";
 
 /**
  * The page someone is on, as a person would say it.

@@ -167,6 +167,18 @@ mod tests {
     }
 
     #[test]
+    fn two_anonymous_readers_are_two_viewers() {
+        // A Household app pairs nobody, so most of its readers have no device.
+        // Counting them under one id would show a houseful of phones as one
+        // person - which is the failure this exists to avoid.
+        let presence = Presence::new();
+        presence.beat("trip", "at:192.168.0.51", "/");
+        presence.beat("trip", "at:192.168.0.77", "/");
+        assert_eq!(presence.viewers("trip").len(), 2);
+        assert_eq!(presence.counts().get("trip"), Some(&2));
+    }
+
+    #[test]
     fn one_person_on_two_devices_is_two_viewers() {
         let presence = Presence::new();
         presence.beat("trip", "phone", "/");

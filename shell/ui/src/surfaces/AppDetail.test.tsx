@@ -130,6 +130,22 @@ describe("AppDetail", () => {
     expect(screen.getByText(/viewing the app/)).toBeDefined();
   });
 
+  it("tells two unpaired readers apart by where they are", async () => {
+    // Household apps pair nobody, so their readers have no device to name.
+    // One row saying "Someone" for a houseful of phones would be worse than
+    // saying where each of them is.
+    answers({
+      "presence.list": [
+        { device_id: "at:192.168.0.51", path: "/", seconds_ago: 1 },
+        { device_id: "at:192.168.0.77", path: "/", seconds_ago: 2 },
+      ],
+    });
+
+    show();
+    await waitFor(() => expect(screen.getByText("Someone at 192.168.0.51")).toBeDefined());
+    expect(screen.getByText("Someone at 192.168.0.77")).toBeDefined();
+  });
+
   it("counts the people reading it, once it has asked", async () => {
     answers({ "presence.list": [{ device_id: "d1", path: "/", seconds_ago: 1 }] });
 

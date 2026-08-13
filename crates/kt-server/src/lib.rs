@@ -280,12 +280,7 @@ async fn beat<S: AppSource, T: TrustSource>(
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    // The owner's own browser has no device record, so it is named by what it
-    // is rather than being dropped: they are reading it too.
-    let who = device
-        .as_ref()
-        .map(|d| d.id.as_str().to_string())
-        .unwrap_or_else(|| OWNER.to_string());
+    let who = viewer_id(device.as_ref(), peer.0);
 
     let path = if beat.path.is_empty() {
         "/".to_string()
@@ -306,12 +301,9 @@ async fn gone<S: AppSource, T: TrustSource>(
     State(state): State<ServerState<S, T>>,
     axum::extract::Query(beat): axum::extract::Query<Beat>,
     headers: axum::http::HeaderMap,
+    peer: Peer,
 ) -> Response {
-    let who = state
-        .trust
-        .device_for(&headers)
-        .map(|d| d.id.as_str().to_string())
-        .unwrap_or_else(|| OWNER.to_string());
+    let who = viewer_id(state.trust.device_for(&headers).as_ref(), peer.0);
 
     if state.presence.left(&beat.app, &who) {
         state
@@ -324,6 +316,28 @@ async fn gone<S: AppSource, T: TrustSource>(
 /// Stands in for the owner's own browser, which has no device record because it
 /// never had to pair with itself.
 pub const OWNER: &str = "owner";
+
+/// What to count a viewer as.
+///
+/// The device when there is one. But a Household app serves anyone on the
+/// network without pairing them, so most of its readers have no device and no
+/// cookie - and lumping them all under one id would show a houseful of phones
+/// as a single viewer. Their address at least tells them apart.
+///
+/// This is emphatically not an identity: nothing is authorised on the strength
+/// of it, the gate has already decided by the time we get here, and an address
+/// is something the device asserts. It only decides which row of a list someone
+/// appears on.
+fn viewer_id(device: Option<&kt_auth::Device>, peer: Option<std::net::IpAddr>) -> String {
+    if let Some(device) = device {
+        return device.id.as_str().to_string();
+    }
+    match peer {
+        Some(addr) if !gate::is_loopback(Some(addr)) => format!("at:{addr}"),
+        // The owner's own browser, which never had to pair with itself.
+        _ => OWNER.to_string(),
+    }
+}
 
 /// Redeem an invite link.
 ///
