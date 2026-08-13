@@ -37,6 +37,7 @@
 //! one byte string for any set of inputs and no way to shift meaning between
 //! fields by padding one of them.
 
+use base64ct::{Base64UrlUnpadded, Encoding};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,66 @@ impl InstallKey {
 impl From<&VerifyingKey> for InstallKey {
     fn from(key: &VerifyingKey) -> Self {
         Self(key.to_bytes())
+    }
+}
+
+impl std::fmt::Display for InstallKey {
+    /// The form it takes everywhere a human or a database sees it: unpadded
+    /// base64url, the same as on the wire. Safe to log and to print - it is the
+    /// public half, and the whole point of it is being told to other people.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&Base64UrlUnpadded::encode_string(&self.0))
+    }
+}
+
+/// A daemon's install keypair: the private half included.
+///
+/// Lives here rather than in the daemon for the same reason `SessionKeys` lives
+/// in `kt-auth` rather than beside the code that stores it - the cryptography
+/// belongs with the thing it is cryptography *for*. Where the key is kept
+/// between runs, and what to do when it cannot be kept, is a separate question
+/// and a different crate's business.
+///
+/// The private half never leaves this type. Callers get [`InstallIdentity::public`]
+/// to register or display, and [`InstallIdentity::hello`] when there is a
+/// challenge to answer.
+pub struct InstallIdentity {
+    signing: SigningKey,
+}
+
+impl InstallIdentity {
+    /// A fresh identity. Generated once per install, on first run.
+    pub fn generate() -> Self {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).expect("the OS random source must work");
+        Self::from_bytes(&seed)
+    }
+
+    pub fn from_bytes(seed: &[u8; 32]) -> Self {
+        Self {
+            signing: SigningKey::from_bytes(seed),
+        }
+    }
+
+    /// The seed, for putting in a keystore. The only way the private half
+    /// leaves, and the caller is expected to have somewhere safe to put it.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
+    /// What the control plane and the edge know this install by.
+    pub fn public(&self) -> InstallKey {
+        InstallKey::from(&self.signing.verifying_key())
+    }
+
+    /// Answer a challenge from the edge.
+    pub fn hello(
+        &self,
+        server: &ServerHello,
+        daemon_version: &str,
+        platform: &str,
+    ) -> Result<ClientHello, HelloError> {
+        ClientHello::sign(server, &self.signing, daemon_version, platform)
     }
 }
 

@@ -47,6 +47,13 @@ pub struct SysStatus {
     pub workspace: String,
     pub serving: ServingState,
     pub app_count: u32,
+    /// This install's public identity to the relay, unpadded base64url.
+    ///
+    /// `None` means the daemon has no identity this run, which is a real state
+    /// and not an error: the keystore would not give one back and inventing a
+    /// replacement would have silently unlinked whatever account this install
+    /// belongs to. Local serving is unaffected; only the relay needs this.
+    pub install_key: Option<String>,
     /// Seconds since the daemon started. `u32` rather than `u64` because
     /// ts-rs maps 64-bit integers to `bigint`, which JSON cannot carry - and
     /// 136 years of uptime is enough.

@@ -9,6 +9,7 @@ function status(over: Partial<SysStatus> = {}): SysStatus {
     workspace: "/ws",
     serving: { state: "serving" },
     app_count: 2,
+    install_key: null,
     uptime_secs: 42,
     ...over,
   };

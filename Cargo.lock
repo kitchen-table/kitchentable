@@ -514,6 +514,7 @@ dependencies = [
  "kt-registry",
  "kt-server",
  "kt-store",
+ "kt-tunnel-proto",
  "kt-types",
  "serde",
  "serde_json",

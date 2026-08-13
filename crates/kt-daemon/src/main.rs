@@ -110,7 +110,14 @@ async fn run() -> Result<(), StartupError> {
         Arc::from(kt_certs::for_this_platform(&paths::state_dir(&home)))
     };
     let keys = keys::load_or_create(secrets);
-    let trust = Arc::new(trust::Trust::new(Arc::clone(&store), keys, events.clone()));
+    // The public half only. It is what the owner links to an account and what
+    // support asks for; the private half stays inside the identity.
+    let install_key = keys.install.as_ref().map(|i| i.public().to_string());
+    let trust = Arc::new(trust::Trust::new(
+        Arc::clone(&store),
+        keys.session,
+        events.clone(),
+    ));
 
     let (listener, port, port_degraded) = bind_http().await?;
 
@@ -208,6 +215,7 @@ async fn run() -> Result<(), StartupError> {
         rescan: Arc::clone(&rescan),
         events: events.clone(),
         presence: Arc::clone(&presence),
+        install_key,
     });
 
     // Nobody tells us when a page stops checking in - that is the whole point

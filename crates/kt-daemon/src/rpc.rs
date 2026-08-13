@@ -35,6 +35,8 @@ pub struct Context {
     pub events: Events,
     /// Who currently has each app open, as the HTTP server hears it.
     pub presence: Arc<kt_server::Presence>,
+    /// This install's public identity, if it has one this run (see keys.rs).
+    pub install_key: Option<String>,
 }
 
 /// The daemon's event bus.
@@ -315,6 +317,7 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             workspace: ctx.workspace.clone(),
             serving: ctx.serving.clone(),
             app_count: ctx.library.len() as u32,
+            install_key: ctx.install_key.clone(),
             uptime_secs: ctx.started.elapsed().as_secs() as u32,
         }),
 
@@ -655,6 +658,7 @@ mod tests {
             rescan: std::sync::Arc::new(|| {}),
             events: Events::new(),
             presence: std::sync::Arc::new(kt_server::Presence::new()),
+            install_key: None,
         }
     }
 

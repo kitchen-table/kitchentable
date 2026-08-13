@@ -69,7 +69,8 @@ pub use control::{
     RECONNECT_MAX_SECS, RECONNECT_MIN_SECS,
 };
 pub use hello::{
-    hello_transcript, Accepted, ClientHello, HelloError, InstallKey, Nonce, ServerHello, NONCE_LEN,
+    hello_transcript, Accepted, ClientHello, HelloError, InstallIdentity, InstallKey, Nonce,
+    ServerHello, NONCE_LEN,
 };
 pub use stream::{HttpRequestHead, HttpResponseHead, StreamOpen, ViewerOrigin};
 pub use version::{VersionError, VersionRange, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
