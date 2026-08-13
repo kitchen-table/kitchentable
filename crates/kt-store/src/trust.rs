@@ -371,9 +371,7 @@ mod tests {
         let store = Store::in_memory().expect("opens");
         let d = device();
         store.upsert_device(&d).expect("inserts");
-        store
-            .rename_device(&d.id, "Kitchen iPad")
-            .expect("renames");
+        store.rename_device(&d.id, "Kitchen iPad").expect("renames");
 
         let back = store.get_device(&d.id).expect("reads").expect("exists");
         assert_eq!(back.name, "Kitchen iPad");

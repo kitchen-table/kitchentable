@@ -109,7 +109,7 @@ describe("Devices", () => {
 
     await waitFor(() => expect(screen.getByText("Android wants access")).toBeDefined());
     const asking = screen.getAllByText(/wants access/);
-    expect(asking[0].textContent).toBe("Android wants access");
+    expect(asking[0]?.textContent).toBe("Android wants access");
   });
 
   it("lists approved devices and lets them be revoked", async () => {
