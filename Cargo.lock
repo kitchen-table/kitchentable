@@ -577,6 +577,14 @@ dependencies = [
 [[package]]
 name = "kt-tunnel-proto"
 version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "ed25519-dalek",
+ "getrandom",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "kt-types"
