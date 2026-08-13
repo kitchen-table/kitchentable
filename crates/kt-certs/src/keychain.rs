@@ -55,14 +55,9 @@ unsafe extern "C" {
         item_ref: *mut SecKeychainItemRef,
     ) -> OsStatus;
 
-    fn SecKeychainItemModifyAttributesAndData(
-        item_ref: SecKeychainItemRef,
-        attr_list: *const c_void,
-        length: u32,
-        data: *const c_void,
-    ) -> OsStatus;
-
     fn SecKeychainItemFreeContent(attr_list: *mut c_void, data: *mut c_void) -> OsStatus;
+
+    fn SecKeychainItemDelete(item_ref: SecKeychainItemRef) -> OsStatus;
 
     fn SecKeychainSetUserInteractionAllowed(state: u8) -> OsStatus;
     fn SecKeychainGetUserInteractionAllowed(state: *mut u8) -> OsStatus;
@@ -139,13 +134,49 @@ impl Keychain {
         Self
     }
 
-    /// Replace the data of an item that already exists.
+    /// File a new item, returning the raw status so `set` can tell a name that
+    /// is already taken apart from a real failure.
     ///
-    /// Separate from `set` because the generic-password API has no upsert:
-    /// adding a duplicate is an error, and the fix is to find the item and
-    /// modify it in place.
-    fn replace(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
-        let _no_ui = NoInteraction::enter();
+    /// Callers hold [`NoInteraction`] for the whole sequence rather than this
+    /// taking it, so a set that adds, removes and adds again cannot have a
+    /// dialog appear between the steps.
+    fn add(&self, name: &str, secret: &[u8]) -> OsStatus {
+        // SAFETY: every pointer is borrowed for the duration of the call, with
+        // lengths passed explicitly. Passing null for `item_ref` means nothing
+        // is returned for us to release.
+        unsafe {
+            SecKeychainAddGenericPassword(
+                std::ptr::null_mut(),
+                SERVICE.len() as u32,
+                SERVICE.as_ptr().cast(),
+                name.len() as u32,
+                name.as_ptr().cast(),
+                secret.len() as u32,
+                secret.as_ptr().cast(),
+                std::ptr::null_mut(),
+            )
+        }
+    }
+
+    /// Remove an item that already exists, so `set` can add a fresh one.
+    ///
+    /// Deliberately *not* `SecKeychainItemModifyAttributesAndData`, which was
+    /// the obvious implementation and the wrong one. A keychain item carries an
+    /// access control list naming the applications allowed to read it, and that
+    /// list belongs to the item rather than to its contents - so modifying in
+    /// place keeps the old ACL, and the daemon that just wrote the key still
+    /// cannot read it back. The failure is quiet and expensive: the write
+    /// returns `errSecSuccess`, and only the next start finds out.
+    ///
+    /// This bites whenever the writing binary's identity changes, which for an
+    /// unsigned development build is every rebuild, and in production would be
+    /// any change of signing identity. Adding fresh gives the item an ACL that
+    /// names the binary doing it now.
+    ///
+    /// Finding the item does not need the ACL: asking for the reference alone
+    /// decrypts nothing, which is why this works even when reading the same
+    /// item does not.
+    fn remove(&self, name: &str) -> Result<(), SecretError> {
         let mut item: SecKeychainItemRef = std::ptr::null_mut();
 
         // SAFETY: both strings are borrowed for the duration of the call and
@@ -167,18 +198,11 @@ impl Keychain {
             return Err(SecretError::Keystore(describe(status)));
         }
 
-        // SAFETY: `item` is a live reference handed back by the call above, and
-        // `secret` is borrowed for the duration of this one.
-        let status = unsafe {
-            SecKeychainItemModifyAttributesAndData(
-                item,
-                std::ptr::null(),
-                secret.len() as u32,
-                secret.as_ptr().cast(),
-            )
-        };
+        // SAFETY: `item` is a live reference handed back by the call above.
+        let status = unsafe { SecKeychainItemDelete(item) };
         // SAFETY: the find above followed the Create Rule, so this reference is
-        // ours to release, and nothing reads `item` after this point.
+        // ours to release, and nothing reads `item` after this point. Deleting
+        // an item does not release the reference to it.
         unsafe { CFRelease(item.cast()) };
 
         if status == ERR_SEC_SUCCESS {
@@ -241,25 +265,19 @@ impl SecretStore for Keychain {
 
     fn set(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
         let _no_ui = NoInteraction::enter();
-        // SAFETY: every pointer is borrowed for the duration of the call, with
-        // lengths passed explicitly. Passing null for `item_ref` means nothing
-        // is returned for us to release.
-        let status = unsafe {
-            SecKeychainAddGenericPassword(
-                std::ptr::null_mut(),
-                SERVICE.len() as u32,
-                SERVICE.as_ptr().cast(),
-                name.len() as u32,
-                name.as_ptr().cast(),
-                secret.len() as u32,
-                secret.as_ptr().cast(),
-                std::ptr::null_mut(),
-            )
-        };
 
-        match status {
+        match self.add(name, secret) {
             ERR_SEC_SUCCESS => Ok(()),
-            ERR_SEC_DUPLICATE_ITEM => self.replace(name, secret),
+            ERR_SEC_DUPLICATE_ITEM => {
+                // Something is already filed under this name. Remove it and add
+                // fresh rather than editing it, so the new item's ACL names the
+                // binary running now - see `remove`.
+                self.remove(name)?;
+                match self.add(name, secret) {
+                    ERR_SEC_SUCCESS => Ok(()),
+                    other => Err(SecretError::Keystore(describe(other))),
+                }
+            }
             other => Err(SecretError::Keystore(describe(other))),
         }
     }
