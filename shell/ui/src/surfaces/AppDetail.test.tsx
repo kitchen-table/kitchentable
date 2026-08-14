@@ -109,6 +109,30 @@ describe("AppDetail", () => {
     expect(screen.getByText("total opens")).toBeDefined();
   });
 
+  it("shows a published app's public address under its name, on every tab", async () => {
+    // The most prominent URL in the window, and the first place somebody looks
+    // to check a rename took. It showed the `.local` name whatever the app's
+    // public address was.
+    answers({ "sys.status": { relay: { state: "connected" } } });
+    show({ public_url: "https://chester-adarsh.kitchentable.cloud" }, "devices");
+
+    await waitFor(() =>
+      expect(screen.getByText(/chester-adarsh\.kitchentable\.cloud · v3/)).toBeDefined(),
+    );
+  });
+
+  it("still opens the local URL, because that is what the gate exempts", async () => {
+    // The owner's own browser on the owner's own machine. Sending them to the
+    // edge and back would show them the wait page for their own app.
+    answers({ "sys.status": { relay: { state: "connected" } } });
+    show({ public_url: "https://chester-adarsh.kitchentable.cloud" });
+
+    await waitFor(() => screen.getByRole("link", { name: /Open/ }));
+    expect(screen.getByRole("link", { name: /Open/ }).getAttribute("href")).toBe(
+      "http://trip-planner.local",
+    );
+  });
+
   it("hands a phone the address that still works after they leave", async () => {
     // The QR is the take-it-with-you affordance, and it was encoding the
     // `.local` name even for a published app - so it worked at the kitchen

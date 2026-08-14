@@ -32,6 +32,10 @@ export function AppDetail({
   onNavigate: (surface: Surface) => void;
 }) {
   const vis = VISIBILITY[app.visibility];
+  // The address under the app's name, on every tab. For a published app that
+  // is its public one: it is the name the owner chose, the name they sent
+  // people, and the first place they look to check it took.
+  const hand = handover(app, useStatus(true).data?.relay);
 
   return (
     <div
@@ -117,13 +121,20 @@ export function AppDetail({
                 textOverflow: "ellipsis",
               }}
             >
-              {app.url.replace(/^https?:\/\//, "")} · v{app.version} · {app.entry}
+              {hand.url.replace(/^https?:\/\//, "")} · v{app.version} · {app.entry}
             </div>
           </div>
 
           <div style={{ display: "flex", gap: 10, flex: "none" }}>
             <a
+              // Deliberately the local URL even when the line above shows the
+              // public one. This is the owner's own browser on the owner's own
+              // machine, and loopback is what earns it the own-machine
+              // exemption in the gate. Opening the public address instead
+              // would send them out to the edge and back and show them the
+              // wait page for their own app.
               href={app.url}
+              title={`Open ${app.url} on this machine`}
               target="_blank"
               rel="noreferrer"
               style={{
