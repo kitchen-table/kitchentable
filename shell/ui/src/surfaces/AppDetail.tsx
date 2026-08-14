@@ -3,7 +3,8 @@ import type { App } from "../generated";
 import { Qr } from "../Qr";
 import { type InviteView, Sharing } from "../Sharing";
 import { type AccessEvent, ago, describe, sentence, size } from "../activity";
-import { call } from "../daemon";
+import { call, useStatus } from "../daemon";
+import { handover } from "../relay";
 import { useDevices } from "../devices";
 import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
 import { DangerZone } from "./DangerZone";
@@ -264,6 +265,10 @@ function Overview({
     retry: false,
   });
 
+  // Which address the QR should carry. Shares react-query's ["status"] entry
+  // with the Sharing tab and the status bar, so asking costs nothing.
+  const hand = handover(app, useStatus(true).data?.relay);
+
   // Shares react-query's ["devices"] entry with the pairing badge and the
   // Devices tab, so naming the rows costs no extra traffic.
   const devices = useDevices();
@@ -389,7 +394,7 @@ function Overview({
           <div style={{ font: "700 13px var(--font-sans)", marginBottom: 12 }}>
             Hand it to a phone
           </div>
-          <Qr value={app.url} size={264} title={`Scan to open ${app.name}`} />
+          <Qr value={hand.url} size={264} title={`Scan to open ${app.name}`} />
           <div
             style={{
               marginTop: 10,
@@ -398,9 +403,22 @@ function Overview({
               wordBreak: "break-all",
             }}
           >
-            {app.url.replace(/^https?:\/\//, "")}
+            {hand.url.replace(/^https?:\/\//, "")}
           </div>
-          {app.hostname === undefined && (
+          {hand.away && (
+            // Worth saying out loud: this is the code that still works after
+            // they have gone home, which is the difference the relay buys.
+            <div
+              style={{
+                marginTop: 6,
+                font: "500 10.5px var(--font-sans)",
+                color: "var(--green)",
+              }}
+            >
+              Works away from your network
+            </div>
+          )}
+          {hand.alternative && (
             <div
               style={{
                 marginTop: 6,
@@ -409,7 +427,7 @@ function Overview({
                 wordBreak: "break-all",
               }}
             >
-              or {app.fallback_url.replace(/^https?:\/\//, "")}
+              or {hand.alternative.replace(/^https?:\/\//, "")}
             </div>
           )}
         </div>

@@ -109,6 +109,33 @@ describe("AppDetail", () => {
     expect(screen.getByText("total opens")).toBeDefined();
   });
 
+  it("hands a phone the address that still works after they leave", async () => {
+    // The QR is the take-it-with-you affordance, and it was encoding the
+    // `.local` name even for a published app - so it worked at the kitchen
+    // table and nowhere else.
+    answers({
+      "sys.status": { relay: { state: "connected" } },
+    });
+    show({ public_url: "https://trip-adarsh.kitchentable.cloud" });
+
+    await waitFor(() =>
+      expect(screen.getByText("trip-adarsh.kitchentable.cloud")).toBeDefined(),
+    );
+    expect(screen.getByText("Works away from your network")).toBeDefined();
+    // The local name is still offered, for a phone that is in the house.
+    expect(screen.getByText(/or trip-planner\.local/)).toBeDefined();
+  });
+
+  it("keeps the local address when the tunnel is not up", async () => {
+    // Handing somebody a code that 502s, while a working one was available,
+    // would be worse than not offering the public name at all.
+    answers({ "sys.status": { relay: { state: "connecting" } } });
+    show({ public_url: "https://trip-adarsh.kitchentable.cloud" });
+
+    await waitFor(() => expect(screen.getByText("trip-planner.local")).toBeDefined());
+    expect(screen.queryByText("trip-adarsh.kitchentable.cloud")).toBeNull();
+  });
+
   it("reports bundle size in human units", () => {
     show({ size_bytes: 42_000 });
     expect(screen.getByText("41 KB")).toBeDefined();

@@ -1,4 +1,32 @@
-import type { RelayMode, RelayState, Visibility } from "./generated";
+import type { App, RelayMode, RelayState, Visibility } from "./generated";
+
+/**
+ * Which address to put in front of somebody holding a phone.
+ *
+ * The QR code is the "take this away with you" affordance, so for a published
+ * app the public address is the one worth handing over: it works in the
+ * kitchen *and* on the train, where the `.local` name stops resolving the
+ * moment they leave.
+ *
+ * Gated on the tunnel actually being up, which is the whole point of knowing.
+ * Handing somebody a code that 502s while a working `.local` one was available
+ * would be a worse answer than not offering the public name at all.
+ */
+export function handover(
+  app: App,
+  tunnel: RelayState | undefined,
+): { url: string; away: boolean; alternative?: string } {
+  if (app.public_url && tunnel?.state === "connected") {
+    return { url: app.public_url, away: true, alternative: app.url };
+  }
+  return {
+    url: app.url,
+    away: false,
+    // Only when there is no `.local` to fall back from. Android is the usual
+    // reason a hostname never resolves.
+    alternative: app.hostname === undefined ? app.fallback_url : undefined,
+  };
+}
 
 /**
  * Whether an app is reachable away from home, and on what terms.
