@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use kt_types::{AppManifest, AppRecord, Visibility};
+use kt_types::{AppManifest, AppRecord, RelayMode, Visibility};
 use rusqlite::{params, Connection, OptionalExtension};
 
 mod migrations;
@@ -78,8 +78,8 @@ impl Store {
         let m = &record.manifest;
         let extra = serde_json::Value::Object(m.extra.clone()).to_string();
         self.lock().execute(
-            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused, relay)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(slug) DO UPDATE SET
                 name = excluded.name,
                 icon = excluded.icon,
@@ -89,6 +89,7 @@ impl Store {
                 path = excluded.path,
                 extra = excluded.extra,
                 paused = excluded.paused,
+                relay = excluded.relay,
                 updated_at = strftime('%s','now')",
             params![
                 m.slug,
@@ -100,6 +101,7 @@ impl Store {
                 record.path,
                 extra,
                 m.paused as i64,
+                relay_str(m.relay),
             ],
         )?;
         Ok(())
@@ -150,7 +152,7 @@ impl Store {
     pub fn list_apps(&self) -> Result<Vec<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay
              FROM apps ORDER BY name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_record(row)))?;
@@ -164,7 +166,7 @@ impl Store {
     pub fn get_app(&self, slug: &str) -> Result<Option<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay
              FROM apps WHERE slug = ?1",
         )?;
         let found = stmt
@@ -223,6 +225,10 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             // Column 8. Index 7 is `extra`, and reading that as an
             // integer would quietly make every app look unpaused.
             paused: row.get::<_, i64>(8)? != 0,
+            // Column 10, index 9. Appended rather than inserted, deliberately:
+            // every index above stays where it was, which is the trap that
+            // adding `paused` set (HANDOFF section 7).
+            relay: relay_from_str(&row.get::<_, String>(9)?),
             extra,
         },
         row.get(6)?,
@@ -249,6 +255,25 @@ fn visibility_from_str(s: &str) -> Visibility {
     }
 }
 
+fn relay_str(mode: RelayMode) -> &'static str {
+    match mode {
+        RelayMode::Off => "off",
+        RelayMode::Standard => "standard",
+        RelayMode::Strict => "strict",
+    }
+}
+
+/// Unknown values fall back to `Off`, on the same principle as visibility above
+/// and with more at stake: a row this build cannot interpret must never become
+/// reachable from the internet because of it.
+fn relay_from_str(s: &str) -> RelayMode {
+    match s {
+        "standard" => RelayMode::Standard,
+        "strict" => RelayMode::Strict,
+        _ => RelayMode::Off,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +281,7 @@ mod tests {
     fn record(slug: &str, name: &str) -> AppRecord {
         AppRecord::unmeasured(
             AppManifest {
+                relay: RelayMode::Off,
                 name: name.into(),
                 slug: slug.into(),
                 icon: None,

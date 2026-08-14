@@ -37,6 +37,11 @@ pub struct ServedApp {
     pub visibility: kt_types::Visibility,
     /// Taken offline by the owner. Refused for everyone, including them.
     pub paused: bool,
+    /// Whether the owner published this app to the relay, and on what terms.
+    ///
+    /// Orthogonal to `visibility`: that says who may open it, this says
+    /// whether it can be asked for from outside this network at all.
+    pub relay: kt_types::RelayMode,
 }
 
 /// Snapshot of what is currently servable. Swapped wholesale when the registry
@@ -181,6 +186,10 @@ impl Peer {
             // The owner's own browser must never have to pair with itself -
             // and nothing arriving over the tunnel is the owner's own browser.
             is_loopback: !self.relayed && gate::is_loopback(self.address),
+            // The one field that is true *because* the request was relayed
+            // rather than false because of it. It costs an unpublished app
+            // nothing locally and refuses it everywhere else.
+            arrived_by_relay: self.relayed,
         }
     }
 }
@@ -313,7 +322,7 @@ async fn beat<S: AppSource, T: TrustSource>(
     let device = state.trust.device_for(&headers);
     let ctx = peer.context(state.trust.as_ref());
     if !matches!(
-        gate::gate(app.visibility, app.paused, device.as_ref(), &ctx),
+        gate::gate(app.visibility, app.paused, app.relay, device.as_ref(), &ctx),
         gate::Gated::Serve
     ) {
         return StatusCode::NO_CONTENT.into_response();
@@ -430,6 +439,11 @@ async fn root<S: AppSource, T: TrustSource>(
 ) -> Response {
     match app_for_host(&*state.apps, &host.0) {
         Some(app) => guarded(&state, &app, "", &headers, &peer).await,
+        // The library index is a list of every app on this machine, by name.
+        // It is a reasonable landing page on somebody's own network and it is
+        // emphatically not something to hand the internet, which is what a
+        // relayed request for an unrecognised hostname would be doing.
+        None if peer.relayed => not_found_page(),
         None => index(&*state.apps).await,
     }
 }
@@ -448,7 +462,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
     let device = state.trust.device_for(headers);
     let ctx = peer.context(state.trust.as_ref());
 
-    match gate::gate(app.visibility, app.paused, device.as_ref(), &ctx) {
+    match gate::gate(app.visibility, app.paused, app.relay, device.as_ref(), &ctx) {
         gate::Gated::Serve => {
             state
                 .trust
@@ -473,11 +487,15 @@ async fn guarded<S: AppSource, T: TrustSource>(
                 gate::Refusal::WrongNetwork => pages::wrong_network(&app.name),
                 gate::Refusal::Paused => pages::paused(&app.name),
                 gate::Refusal::NotShared | gate::Refusal::Revoked => pages::denied(&app.name),
+                // Deliberately the same page an unknown hostname gets. To the
+                // internet, an unpublished app is not a thing that exists.
+                gate::Refusal::NotPublished => pages::not_found(),
             };
             // 503 rather than 403 for a pause: nothing is wrong with the
             // request or the requester, the app is simply not running.
             let status = match reason {
                 gate::Refusal::Paused => StatusCode::SERVICE_UNAVAILABLE,
+                gate::Refusal::NotPublished => StatusCode::NOT_FOUND,
                 _ => StatusCode::FORBIDDEN,
             };
             (status, html_body(body)).into_response()
@@ -555,10 +573,27 @@ async fn serve<S: AppSource, T: TrustSource>(
         return guarded(state, &app, &full, headers, peer).await;
     }
 
+    // Path-prefix routing is a local convenience: it is how an app is reached
+    // from a plain IP address when mDNS is not available. Over the relay it is
+    // a way into an app the hostname did not name, so it is not available -
+    // app identity comes from the host and never from a path
+    // (repo-architecture.md section 8).
+    if peer.relayed {
+        return not_found_page();
+    }
+
     let Some(app) = state.apps.get(slug) else {
         return not_found("No app by that name is being served.");
     };
     guarded(state, &app, path, headers, peer).await
+}
+
+/// The page for "there is nothing at this address", with the status to match.
+///
+/// Shared by an unrecognised relay hostname and an unpublished app so the two
+/// are indistinguishable from outside; see `pages::not_found`.
+fn not_found_page() -> Response {
+    (StatusCode::NOT_FOUND, html_body(pages::not_found())).into_response()
 }
 
 async fn serve_app(app: &ServedApp, path: &str) -> Response {
@@ -710,9 +745,17 @@ mod tests {
         );
         assert!(!ctx.is_loopback);
 
-        // And the gate, which is the thing that actually decides, agrees.
+        // And the gate, which is the thing that actually decides, agrees -
+        // even with the app published, so this measures the household flag
+        // rather than the relay switch that now sits in front of it.
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Network,
+                false,
+                kt_types::RelayMode::Standard,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Deny(kt_auth::DenyReason::WrongNetwork)
         );
     }
@@ -725,7 +768,13 @@ mod tests {
 
         assert!(ctx.on_household_network);
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Network,
+                false,
+                kt_types::RelayMode::Off,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Allow
         );
     }
@@ -740,7 +789,13 @@ mod tests {
 
         assert!(!ctx.is_loopback, "a relayed request claimed to be local");
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Private, false, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Private,
+                false,
+                kt_types::RelayMode::Standard,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Deny(kt_auth::DenyReason::NotTheOwner)
         );
     }
@@ -753,20 +808,51 @@ mod tests {
 
         assert!(!ctx.on_household_network);
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Network, false, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Network,
+                false,
+                kt_types::RelayMode::Standard,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Deny(kt_auth::DenyReason::WrongNetwork)
         );
     }
 
     #[test]
-    fn a_relayed_request_can_still_reach_a_public_app() {
+    fn a_relayed_request_reaches_a_published_public_app() {
         // The relay is not a blanket refusal - it is the only way Public means
         // what the picker says it means. Nothing above should have broken that.
         let ctx = relayed("203.0.113.9").context(&AtHome);
 
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Public, false, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Public,
+                false,
+                kt_types::RelayMode::Standard,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Allow
+        );
+    }
+
+    #[test]
+    fn the_same_public_app_unpublished_is_not_reachable_at_all() {
+        // The pair to the test above, and the one that matters more. Public is
+        // what the owner chose for their own network; it does not put the app
+        // on the internet until they say so separately.
+        let ctx = relayed("203.0.113.9").context(&AtHome);
+
+        assert_eq!(
+            kt_auth::decide(
+                kt_types::Visibility::Public,
+                false,
+                kt_types::RelayMode::Off,
+                None,
+                &ctx
+            ),
+            kt_auth::Decision::Deny(kt_auth::DenyReason::NotPublished)
         );
     }
 
@@ -775,7 +861,13 @@ mod tests {
         let ctx = relayed("203.0.113.9").context(&AtHome);
 
         assert_eq!(
-            kt_auth::decide(kt_types::Visibility::Public, true, None, &ctx),
+            kt_auth::decide(
+                kt_types::Visibility::Public,
+                true,
+                kt_types::RelayMode::Off,
+                None,
+                &ctx
+            ),
             kt_auth::Decision::Deny(kt_auth::DenyReason::Paused)
         );
     }

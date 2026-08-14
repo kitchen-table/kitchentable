@@ -128,6 +128,23 @@ for a new one.</p>"#,
     )
 }
 
+/// Nothing at this address.
+///
+/// Served for a hostname nobody has claimed and for an app whose owner has not
+/// published it to the relay - deliberately the same page, and deliberately
+/// naming neither. The two are indistinguishable from outside on purpose: a
+/// page that said "this app exists but is not published" would confirm which
+/// apps a machine has to anybody willing to guess names.
+pub fn not_found() -> String {
+    page(
+        "Not found",
+        r#"<h1>Nothing here</h1>
+<p>There is no app at this address.</p>
+<p class="small">Check the link, or ask whoever shared it for a fresh one.</p>"#,
+        None,
+    )
+}
+
 /// The link itself is no good: expired, revoked, or already claimed by another
 /// device. Each reason gets its own sentence, because "invalid link" leaves
 /// someone with nothing to do.

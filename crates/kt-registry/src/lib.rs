@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kt_types::{AppManifest, AppRecord, Visibility};
+use kt_types::{AppManifest, AppRecord, RelayMode, Visibility};
 use notify::{RecursiveMode, Watcher};
 
 pub mod slug;
@@ -169,6 +169,9 @@ impl Registry {
             visibility: Visibility::Private,
             version: 1,
             paused: false,
+            // A new folder is not on the internet. Nothing about appearing in
+            // the workspace publishes anything.
+            relay: RelayMode::Off,
             extra: serde_json::Map::new(),
         };
 
