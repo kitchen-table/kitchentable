@@ -47,6 +47,7 @@ function app(over: Partial<App> = {}): App {
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
+    loopback_url: "http://localhost/trip-planner",
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     deployed_at: 1_760_000_000,

@@ -28,6 +28,7 @@ const welcomeApp: App = {
     public_label: "trip",
   url: "http://welcome.local",
   fallback_url: "http://192.168.0.5/welcome",
+  loopback_url: "http://localhost/welcome",
   path: "/ws/Welcome",
   size_bytes: 42_000,
   deployed_at: 1_760_000_000,

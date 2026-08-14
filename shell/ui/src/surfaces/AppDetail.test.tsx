@@ -22,6 +22,7 @@ function app(over: Partial<App> = {}): App {
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
+    loopback_url: "http://localhost/trip-planner",
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     deployed_at: Math.floor(Date.now() / 1000) - 7200,
@@ -121,15 +122,20 @@ describe("AppDetail", () => {
     );
   });
 
-  it("still opens the local URL, because that is what the gate exempts", async () => {
-    // The owner's own browser on the owner's own machine. Sending them to the
-    // edge and back would show them the wait page for their own app.
+  it("opens loopback, which is the only address the owner is exempt on", async () => {
+    // This asserted `.local` until an owner clicked Open on a Private app and
+    // was refused on their own machine. `.local` resolves to this machine's
+    // LAN address, so it is not loopback and earns no exemption: 403 for
+    // Private, and a pairing prompt for Invited.
     answers({ "sys.status": { relay: { state: "connected" } } });
-    show({ public_url: "https://chester-adarsh.kitchentable.cloud" });
+    show({
+      visibility: "private",
+      public_url: "https://chester-adarsh.kitchentable.cloud",
+    });
 
     await waitFor(() => screen.getByRole("link", { name: /Open/ }));
     expect(screen.getByRole("link", { name: /Open/ }).getAttribute("href")).toBe(
-      "http://trip-planner.local",
+      "http://localhost/trip-planner",
     );
   });
 

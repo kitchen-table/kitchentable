@@ -37,6 +37,17 @@ hostname?: string,
  */
 fallback_url: string, 
 /**
+ * The loopback URL, for the owner's own browser on this machine.
+ *
+ * The one address that is always openable by the owner whatever the
+ * visibility, because loopback is what the gate exempts. Neither `url` nor
+ * `fallback_url` is loopback: the announced `.local` name and the IP one
+ * both resolve to this machine's *LAN* address, which is why opening
+ * either was answered 403 on a Private app and asked for pairing on an
+ * Invited one - on the owner's own machine.
+ */
+loopback_url: string, 
+/**
  * Where this app answers from away from home, once its owner has
  * published it and an account has claimed a handle.
  *

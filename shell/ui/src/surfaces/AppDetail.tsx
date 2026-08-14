@@ -127,14 +127,14 @@ export function AppDetail({
 
           <div style={{ display: "flex", gap: 10, flex: "none" }}>
             <a
-              // Deliberately the local URL even when the line above shows the
-              // public one. This is the owner's own browser on the owner's own
-              // machine, and loopback is what earns it the own-machine
-              // exemption in the gate. Opening the public address instead
-              // would send them out to the edge and back and show them the
-              // wait page for their own app.
-              href={app.url}
-              title={`Open ${app.url} on this machine`}
+              // Loopback, not the announced `.local` name and not the address
+              // URL. Both of those resolve to this machine's *LAN* address, so
+              // neither earns the own-machine exemption in the gate: clicking
+              // this on a Private app was answered 403, and on an Invited one
+              // it asked the owner to pair with their own machine. Loopback is
+              // the one address that always opens for the person sitting here.
+              href={app.loopback_url}
+              title={`Open ${app.loopback_url} on this machine`}
               target="_blank"
               rel="noreferrer"
               style={{
