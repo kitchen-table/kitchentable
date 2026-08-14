@@ -167,6 +167,20 @@ export function ago(at: number, now: number = Date.now() / 1000): string {
   });
 }
 
+/**
+ * "expires 21 Aug", not "expires".
+ *
+ * A chip that says a link expires without saying when is worse than no chip:
+ * it raises the question and refuses to answer it.
+ */
+export function expiry(at: number | null): string {
+  if (at === null) return "no expiry";
+  return `expires ${new Date(at * 1000).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+  })}`;
+}
+
 /** "12.4 MB". Binary units, because that is what a file manager shows. */
 export function size(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

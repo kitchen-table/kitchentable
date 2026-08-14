@@ -99,6 +99,14 @@ const MIGRATIONS: &[&str] = &[
     -- must not be the moment that changes.
     ALTER TABLE apps ADD COLUMN relay TEXT NOT NULL DEFAULT 'off';
     "#,
+    // 6: the editable part of an app's public address.
+    r#"
+    -- Nullable, and null means "use the slug". That distinction is the whole
+    -- point: an app that has never been renamed must follow its folder, and an
+    -- app that has been renamed must not, so "unset" and "set to the slug" are
+    -- genuinely different states and a NOT NULL default would erase the first.
+    ALTER TABLE apps ADD COLUMN public_label TEXT;
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

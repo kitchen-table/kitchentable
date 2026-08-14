@@ -7,18 +7,30 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::{app::App, status::ServingState};
+use crate::{app::App, status::RelayState, status::ServingState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[ts(export)]
 pub enum Event {
     /// An app appeared, changed, or its manifest was rewritten.
-    AppChanged { app: App },
+    ///
+    /// Boxed because `App` is by far the largest thing any event carries, and
+    /// every variant of an enum costs the size of its biggest one. These sit in
+    /// a 256-slot broadcast ring, so that difference is paid 256 times over for
+    /// events that are a slug and a string. Transparent on the wire and in the
+    /// generated TypeScript.
+    AppChanged { app: Box<App> },
     /// An app folder left the workspace.
     AppRemoved { slug: String },
     /// Serving started, stopped, or degraded. Drives the tray and the banner.
     ServingChanged { serving: ServingState },
+    /// The tunnel came up, went down, or gave up.
+    ///
+    /// Pushed rather than polled because the gap between an app going
+    /// unreachable and the window admitting it is exactly the interval somebody
+    /// spends sending a link that does not work.
+    RelayChanged { relay: RelayState },
     /// A device is waiting to be let in. This is what pops the approval prompt
     /// (docs/architecture.md section 4).
     ///

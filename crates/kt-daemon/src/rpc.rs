@@ -37,6 +37,9 @@ pub struct Context {
     pub presence: Arc<kt_server::Presence>,
     /// This install's public identity, if it has one this run (see keys.rs).
     pub install_key: Option<String>,
+    /// Whether the tunnel is up right now. Written by the relay task, read
+    /// here, so `sys.status` reports the connection rather than the intention.
+    pub relay: Arc<crate::relay::RelayStatus>,
 }
 
 /// The daemon's event bus.
@@ -96,6 +99,7 @@ impl Context {
 pub fn urls_for(urls: &Urls, library: &Library, slug: &str) -> Urls {
     Urls {
         hostname: library.hostname(slug),
+        public_host: library.public_host(slug),
         ..urls.clone()
     }
 }
@@ -218,6 +222,82 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&serde_json::json!({ "slug": slug, "relay": raw }))
         }
 
+        // Rename the app's public address, without touching anything local.
+        //
+        // A third separate call, for the third distinct decision. `label: null`
+        // resets to the slug, which is the only way back to "follows the
+        // folder" once somebody has typed something.
+        //
+        // Nothing here republishes or unpublishes: changing what a published
+        // app is called must not take it off the internet, and naming an
+        // unpublished one must not put it on.
+        "share.set_public_label" => {
+            let slug = string_param(request, "slug")?;
+            let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+
+            let raw = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("label"))
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or_else(|| KtError {
+                        code: ErrorCode::BadRequest,
+                        message: "label must be a string or null".into(),
+                        detail: None,
+                    })
+                })
+                .transpose()?;
+
+            let label = match raw {
+                None => None,
+                Some(raw) => {
+                    // Without a handle there is nothing to join the label to,
+                    // so nothing can be checked against a real hostname length
+                    // and nothing would resolve. Refuse rather than store a
+                    // name that means nothing yet.
+                    let (handle, _) = ctx.library.relay_identity().ok_or_else(|| KtError {
+                        code: ErrorCode::InvalidState,
+                        message: "this machine has no handle yet, so it has no public addresses"
+                            .into(),
+                        detail: None,
+                    })?;
+
+                    let label =
+                        kt_types::normalise_public_label(&raw, &handle).map_err(invalid_label)?;
+
+                    // Two apps answering to one address means one of them is
+                    // silently unreachable. Checked against the *effective*
+                    // label, so an app that never set one still defends its
+                    // slug.
+                    if let Some(other) = ctx.library.slug_for_public_label(&label) {
+                        if other != slug {
+                            return Err(invalid_label(kt_types::PublicLabelError::Taken {
+                                slug: other,
+                            }));
+                        }
+                    }
+                    Some(label)
+                }
+            };
+
+            write_public_label(&record.path, label.as_deref()).map_err(|e| KtError {
+                code: ErrorCode::Io,
+                message: format!("could not update the manifest: {e}"),
+                detail: None,
+            })?;
+            // The address changes the moment this returns, so the library has
+            // to agree before the next request arrives over the relay.
+            (ctx.rescan)();
+
+            let effective = label.unwrap_or_else(|| slug.clone());
+            json(&serde_json::json!({
+                "slug": slug,
+                "public_label": effective,
+                "public_host": ctx.library.public_host(&slug),
+            }))
+        }
+
         "share.create_invite" => {
             let slug = string_param(request, "slug")?;
             if ctx.library.record(&slug).is_none() {
@@ -328,15 +408,21 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&events)
         }
 
-        "sys.status" => json(&SysStatus {
-            protocol_version: PROTOCOL_VERSION,
-            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
-            workspace: ctx.workspace.clone(),
-            serving: ctx.serving.clone(),
-            app_count: ctx.library.len() as u32,
-            install_key: ctx.install_key.clone(),
-            uptime_secs: ctx.started.elapsed().as_secs() as u32,
-        }),
+        "sys.status" => {
+            let identity = ctx.library.relay_identity();
+            json(&SysStatus {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+                workspace: ctx.workspace.clone(),
+                serving: ctx.serving.clone(),
+                app_count: ctx.library.len() as u32,
+                install_key: ctx.install_key.clone(),
+                relay_handle: identity.as_ref().map(|(h, _)| h.clone()),
+                relay_domain: identity.as_ref().map(|(_, d)| d.clone()),
+                relay: ctx.relay.get().into(),
+                uptime_secs: ctx.started.elapsed().as_secs() as u32,
+            })
+        }
 
         // The socket layer notices this method and starts forwarding events on
         // the connection; the answer here is only the acknowledgement, so a
@@ -508,6 +594,45 @@ fn write_relay(path: &str, mode: kt_types::RelayMode) -> std::io::Result<()> {
     std::fs::write(&manifest_path, format!("{pretty}\n"))
 }
 
+/// Write the public label, or remove the key entirely to reset to the slug.
+///
+/// Removed rather than written as null, because an absent key is what "this
+/// app has never been renamed" looks like everywhere else - in the struct, in
+/// the column, and to a human reading `app.json`.
+fn write_public_label(path: &str, label: Option<&str>) -> std::io::Result<()> {
+    let manifest_path = std::path::Path::new(path).join("app.json");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    match (label, manifest.as_object_mut()) {
+        (Some(label), _) => manifest["public_label"] = serde_json::json!(label),
+        (None, Some(map)) => {
+            map.remove("public_label");
+        }
+        (None, None) => {}
+    }
+
+    let pretty = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&manifest_path, format!("{pretty}\n"))
+}
+
+/// A rejected address, with the reason in a form the field can print.
+fn invalid_label(e: kt_types::PublicLabelError) -> KtError {
+    KtError {
+        // A name somebody else already answers to is a conflict, not a
+        // malformed request: the owner typed something perfectly valid and the
+        // only problem is that it is spoken for.
+        code: match e {
+            kt_types::PublicLabelError::Taken { .. } => ErrorCode::Conflict,
+            _ => ErrorCode::BadRequest,
+        },
+        message: e.message(),
+        detail: None,
+    }
+}
+
 fn write_visibility(path: &str, visibility: kt_types::Visibility) -> std::io::Result<()> {
     let manifest_path = std::path::Path::new(path).join("app.json");
     let raw = std::fs::read_to_string(&manifest_path)?;
@@ -527,11 +652,33 @@ fn write_visibility(path: &str, visibility: kt_types::Visibility) -> std::io::Re
 }
 
 /// An invite as a client sees it, with the URL already built.
+///
+/// A published app's invite carries its **public** name. An invite is for
+/// somebody who is not on this network - that is what makes it an invite rather
+/// than just telling them the address - so handing them a `.local` URL gives
+/// them a link only the people who did not need one can open.
+///
+/// Everything else falls back to the announced hostname and then to the address
+/// URL, which is right for an app nobody has published: it is reachable on this
+/// network and nowhere else, and the link should say so.
 fn invite_view(ctx: &Context, invite: &Invite) -> serde_json::Value {
+    let published = ctx
+        .library
+        .record(&invite.app_slug)
+        .is_some_and(|r| r.manifest.relay.is_published());
+
     let origin = ctx
         .library
-        .hostname(&invite.app_slug)
-        .map(|h| format!("{}://{h}{}", ctx.urls.scheme, ctx.urls.port_suffix))
+        .public_host(&invite.app_slug)
+        .filter(|_| published)
+        // https, not `ctx.urls.scheme`: the local listener speaks http and the
+        // edge does not, so the relay must not inherit the local scheme.
+        .map(|host| format!("https://{host}"))
+        .or_else(|| {
+            ctx.library
+                .hostname(&invite.app_slug)
+                .map(|h| format!("{}://{h}{}", ctx.urls.scheme, ctx.urls.port_suffix))
+        })
         .unwrap_or_else(|| ctx.urls.fallback_origin.clone());
 
     serde_json::json!({
@@ -682,6 +829,7 @@ mod tests {
         library.replace(vec![AppRecord::unmeasured(
             AppManifest {
                 relay: Default::default(),
+                public_label: None,
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
                 icon: None,
@@ -704,6 +852,7 @@ mod tests {
                 port_suffix: ":8420".into(),
                 prefix_origin: "http://localhost:8420".into(),
                 fallback_origin: "http://192.168.1.24:8420".into(),
+                public_host: None,
             },
             serving: ServingState::Serving,
             started: Instant::now(),
@@ -712,6 +861,72 @@ mod tests {
             events: Events::new(),
             presence: std::sync::Arc::new(kt_server::Presence::new()),
             install_key: None,
+            relay: Arc::new(crate::relay::RelayStatus::new()),
+        }
+    }
+
+    /// A context whose app has a real folder and a real `app.json`.
+    ///
+    /// The shared `context()` points every app at the bare temp directory,
+    /// which is fine while nothing writes - but the manifest writers are
+    /// exactly the kind of code that passes every unit test and then fails on
+    /// a real file, so the tests that exercise them get a folder they own.
+    fn context_on_disk() -> (Context, tempdir::TempDir) {
+        let dir = tempdir::TempDir::new();
+        std::fs::write(
+            dir.path().join("app.json"),
+            r#"{"name":"Trip Planner","slug":"trip-planner"}"#,
+        )
+        .expect("writes a manifest");
+
+        let mut ctx = context();
+        let path = dir.path().display().to_string();
+        let records: Vec<_> = ctx
+            .library
+            .records()
+            .into_iter()
+            .map(|mut r| {
+                r.path = path.clone();
+                r
+            })
+            .collect();
+        ctx.library.replace(records);
+        ctx.workspace = path;
+        (ctx, dir)
+    }
+
+    /// Minimal scoped temp directory, matching authoring.rs and kt-registry's:
+    /// a dependency for a handful of tests is not worth it (CLAUDE.md rule 6).
+    mod tempdir {
+        use std::path::{Path, PathBuf};
+
+        pub struct TempDir(PathBuf);
+
+        impl TempDir {
+            pub fn new() -> Self {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static SEQ: AtomicU32 = AtomicU32::new(0);
+
+                let mut path = std::env::temp_dir();
+                path.push(format!(
+                    "kt-rpc-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                std::fs::create_dir_all(&path).expect("creates temp dir");
+                Self(path)
+            }
+
+            pub fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
         }
     }
 
@@ -812,6 +1027,169 @@ mod tests {
         );
         assert_eq!(invite["pin_to_first_device"], true, "links pin by default");
         assert_eq!(invite["active"], true);
+    }
+
+    #[test]
+    fn a_public_address_can_be_renamed_and_reset() {
+        let (ctx, _dir) = context_on_disk();
+        ctx.library
+            .set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        let set = |label: serde_json::Value| {
+            let req = request(
+                "share.set_public_label",
+                Some(serde_json::json!({ "slug": "trip-planner", "label": label })),
+            );
+            dispatch(&ctx, &req)
+        };
+
+        let ResponsePayload::Result(v) = set(serde_json::json!("Holiday")) else {
+            panic!("renaming should succeed");
+        };
+        assert_eq!(v["public_label"], "holiday", "normalised, not refused");
+
+        // Null is the way back to following the folder.
+        let ResponsePayload::Result(v) = set(serde_json::Value::Null) else {
+            panic!("resetting should succeed");
+        };
+        assert_eq!(v["public_label"], "trip-planner");
+    }
+
+    #[test]
+    fn renaming_a_public_address_says_which_rule_was_broken() {
+        // "Invalid" next to a text box is the least useful thing a form can
+        // say, so each refusal has to name itself.
+        let ctx = context();
+        ctx.library
+            .set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        let req = request(
+            "share.set_public_label",
+            Some(serde_json::json!({ "slug": "trip-planner", "label": "my trip" })),
+        );
+        let ResponsePayload::Error(e) = dispatch(&ctx, &req) else {
+            panic!("a space is not a hostname");
+        };
+        assert_eq!(e.code, ErrorCode::BadRequest);
+        assert!(e.message.contains("letters, numbers and hyphens"), "{e:?}");
+    }
+
+    #[test]
+    fn an_address_another_app_already_answers_to_is_a_conflict() {
+        // Two apps on one address means one of them is silently unreachable,
+        // which is the worst shape this bug could take: everything looks fine.
+        let (ctx, _dir) = context_on_disk();
+        ctx.library
+            .set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        let mut second = ctx.library.record("trip-planner").expect("the app");
+        second.manifest.slug = "chores".into();
+        let first = ctx.library.record("trip-planner").expect("the app");
+        ctx.library.replace(vec![first, second]);
+
+        let req = request(
+            "share.set_public_label",
+            Some(serde_json::json!({ "slug": "chores", "label": "trip-planner" })),
+        );
+        let ResponsePayload::Error(e) = dispatch(&ctx, &req) else {
+            panic!("two apps must not share one public address");
+        };
+        assert_eq!(e.code, ErrorCode::Conflict);
+
+        // But an app may always keep its own address - a no-op rename is not a
+        // collision with itself.
+        let req = request(
+            "share.set_public_label",
+            Some(serde_json::json!({ "slug": "chores", "label": "chores" })),
+        );
+        assert!(matches!(dispatch(&ctx, &req), ResponsePayload::Result(_)));
+    }
+
+    #[test]
+    fn an_install_with_no_handle_refuses_to_name_anything() {
+        // Nothing to join a label to and nothing that would resolve. Storing
+        // it anyway would leave a name that means nothing until an account
+        // arrives, and then means something nobody chose.
+        let ctx = context();
+        let req = request(
+            "share.set_public_label",
+            Some(serde_json::json!({ "slug": "trip-planner", "label": "holiday" })),
+        );
+        let ResponsePayload::Error(e) = dispatch(&ctx, &req) else {
+            panic!("there is no address to set");
+        };
+        assert_eq!(e.code, ErrorCode::InvalidState);
+    }
+
+    #[test]
+    fn status_reports_the_tunnel_rather_than_the_intention() {
+        // The bug this exists for: the window rendered a green ON badge from
+        // the manifest, so an app that had been unreachable for an hour looked
+        // healthy and the owner found out from a stranger. Publishing is an
+        // intention; being reachable is a fact, and they are different fields.
+        let ctx = context();
+        let status = result(&ctx, &request("sys.status", None));
+        assert_eq!(status["relay"]["state"], "off", "no relay configured");
+
+        ctx.relay.set(crate::relay::RelayState::Connected);
+        let status = result(&ctx, &request("sys.status", None));
+        assert_eq!(status["relay"]["state"], "connected");
+
+        ctx.relay
+            .set(crate::relay::RelayState::NeedsAttention("revoked".into()));
+        let status = result(&ctx, &request("sys.status", None));
+        assert_eq!(status["relay"]["state"], "needs_attention");
+        assert_eq!(status["relay"]["message"], "revoked");
+    }
+
+    #[test]
+    fn status_carries_the_handle_so_the_window_can_show_the_suffix() {
+        let ctx = context();
+        let status = result(&ctx, &request("sys.status", None));
+        assert!(status["relay_handle"].is_null(), "no handle by default");
+
+        ctx.library
+            .set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+        let status = result(&ctx, &request("sys.status", None));
+        assert_eq!(status["relay_handle"], "adarsh");
+        assert_eq!(status["relay_domain"], "kitchentable.cloud");
+    }
+
+    #[test]
+    fn a_published_apps_invite_carries_a_link_that_works_away_from_home() {
+        // The bug this exists for: an invite is *for* somebody who is not on
+        // this network, and a `.local` URL is openable only by the people who
+        // never needed an invite. Publishing has to change the link it hands
+        // out or sharing the app is impossible from the one screen for it.
+        let ctx = context();
+        ctx.library
+            .set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        let make = |ctx: &Context| {
+            let req = request(
+                "share.create_invite",
+                Some(serde_json::json!({ "slug": "trip-planner" })),
+            );
+            result(ctx, &req)["url"]
+                .as_str()
+                .expect("a url")
+                .to_string()
+        };
+
+        // Unpublished: reachable on this network and nowhere else, and the
+        // link says so rather than promising reach the app has not got.
+        let local = make(&ctx);
+        assert!(!local.contains("kitchentable.cloud"), "got {local}");
+
+        let mut record = ctx.library.record("trip-planner").expect("the app");
+        record.manifest.relay = kt_types::RelayMode::Standard;
+        ctx.library.replace(vec![record]);
+
+        let public = make(&ctx);
+        assert!(
+            public.starts_with("https://trip-planner-adarsh.kitchentable.cloud/i/"),
+            "a published app's invite must be openable from outside; got {public}"
+        );
     }
 
     #[test]

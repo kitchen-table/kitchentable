@@ -257,6 +257,18 @@ a:hover {
   }
 }
 
+/* Something is still being attempted: a tunnel redialling, not a settled state.
+   Distinct from kt-ping, which says a thing is happily alive. */
+@keyframes kt-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
 @keyframes kt-fade {
   from {
     opacity: 0;

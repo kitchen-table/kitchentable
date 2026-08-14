@@ -116,6 +116,10 @@ async fn run() -> Result<(), StartupError> {
     let install_key = keys.install.as_ref().map(|i| i.public().to_string());
 
     let relay_identity = keys.install.clone();
+    // Shared between the relay task, which writes it, and `sys.status`, which
+    // reads it. Built here even when there is no relay, because "off" is a
+    // real answer the window needs and not the absence of one.
+    let relay_status = Arc::new(relay::RelayStatus::new());
     let trust = Arc::new(trust::Trust::new(
         Arc::clone(&store),
         keys.session,
@@ -141,7 +145,8 @@ async fn run() -> Result<(), StartupError> {
 
     let urls = Urls {
         scheme: "http".to_string(),
-        hostname: None, // filled per app from the library
+        hostname: None,    // filled per app from the library
+        public_host: None, // likewise, and only once a handle is claimed
         port_suffix: if port == 80 {
             String::new()
         } else {
@@ -219,6 +224,7 @@ async fn run() -> Result<(), StartupError> {
         events: events.clone(),
         presence: Arc::clone(&presence),
         install_key,
+        relay: Arc::clone(&relay_status),
     });
 
     // Nobody tells us when a page stops checking in - that is the whole point
@@ -300,7 +306,21 @@ async fn run() -> Result<(), StartupError> {
     match (relay::Config::from_env(), relay_identity) {
         (Some(config), Some(identity)) => {
             tracing::info!(url = config.url, "relay configured; dialling");
-            tokio::spawn(relay::run(config, identity, Arc::new(app.clone())));
+            let events = events.clone();
+            tokio::spawn(relay::run(
+                config,
+                identity,
+                Arc::new(app.clone()),
+                Arc::clone(&relay_status),
+                // Pushed as it happens. A window that learns the tunnel dropped
+                // sixty seconds late is a window that let somebody send a link
+                // in the meantime.
+                move |state| {
+                    events.send(Event::RelayChanged {
+                        relay: state.into(),
+                    })
+                },
+            ));
         }
         (Some(_), None) => tracing::warn!(
             "a relay is configured but this install has no identity, so there \
@@ -414,7 +434,7 @@ fn sync_with(
         if was.get(&slug) != Some(&fingerprint(&record)) {
             let app_urls = rpc::urls_for(urls, library, &slug);
             events.send(Event::AppChanged {
-                app: record.to_app(&app_urls),
+                app: Box::new(record.to_app(&app_urls)),
             });
         }
     }

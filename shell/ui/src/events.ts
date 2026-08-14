@@ -46,6 +46,10 @@ export function invalidate(client: QueryClient, event: Event): void {
       void client.invalidateQueries({ queryKey: ["presence", event.app_slug] });
       break;
     case "serving_changed":
+    // Both live on sys.status. The relay one matters most while it is *bad*:
+    // the seconds between a tunnel dropping and the window admitting it are
+    // exactly when somebody sends a link that will not work.
+    case "relay_changed":
       void client.invalidateQueries({ queryKey: ["status"] });
       break;
     case "error":

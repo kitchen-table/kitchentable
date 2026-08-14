@@ -16,6 +16,8 @@ function app(over: Partial<App> = {}): App {
     visibility: "invited",
     version: 3,
     paused: false,
+    relay: "off",
+    public_label: "trip",
     url: "http://trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
     path: "/ws/Trip Planner",

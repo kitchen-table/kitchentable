@@ -37,6 +37,28 @@ pub enum DegradedReason {
     MdnsUnavailable,
 }
 
+/// Whether this machine is reachable from the internet right now.
+///
+/// Distinct from whether any app is *published*, which is per-app and lives in
+/// the manifest. An app can be published and unreachable, which is what happens
+/// every time the tunnel drops - and the window has to be able to tell the
+/// difference, because for a long time it could not and showed a confident
+/// green badge over an app nobody outside could open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[ts(export)]
+pub enum RelayState {
+    /// No relay configured. Every install today, and not a fault.
+    Off,
+    /// Dialling, or waiting to dial again after a drop.
+    Connecting,
+    /// Up. Published apps are reachable at their public addresses.
+    Connected,
+    /// Stopped trying, because waiting cannot fix it. Somebody has to act, so
+    /// the message is written to be read by them.
+    NeedsAttention { message: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SysStatus {
@@ -54,6 +76,25 @@ pub struct SysStatus {
     /// replacement would have silently unlinked whatever account this install
     /// belongs to. Local serving is unaffected; only the relay needs this.
     pub install_key: Option<String>,
+    /// This machine's handle and the domain its apps hang off, e.g.
+    /// `("adarsh", "kitchentable.cloud")` rendered as a suffix.
+    ///
+    /// Install-level rather than per-app because **one handle covers every app
+    /// on this machine** - that is what makes one entry in the edge enough. The
+    /// window needs it to show what an address will look like before the app
+    /// has one, so it can render `<label>-adarsh.kitchentable.cloud` while the
+    /// owner is still typing the label.
+    ///
+    /// `None` until an account claims a handle, which is every install today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub relay_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub relay_domain: Option<String>,
+    /// Whether the tunnel is up right now, which decides whether a published
+    /// app is actually reachable.
+    pub relay: RelayState,
     /// Seconds since the daemon started. `u32` rather than `u64` because
     /// ts-rs maps 64-bit integers to `bigint`, which JSON cannot carry - and
     /// 136 years of uptime is enough.

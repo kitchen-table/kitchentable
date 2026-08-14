@@ -11,6 +11,7 @@ function status(over: Partial<SysStatus> = {}): SysStatus {
     serving: { state: "serving" },
     app_count: 1,
     install_key: null,
+    relay: { state: "off" },
     uptime_secs: 10,
     ...over,
   };
@@ -23,6 +24,8 @@ const welcomeApp: App = {
   visibility: "private",
   version: 1,
   paused: false,
+  relay: "off",
+    public_label: "trip",
   url: "http://welcome.local",
   fallback_url: "http://192.168.0.5/welcome",
   path: "/ws/Welcome",
