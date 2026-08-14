@@ -88,6 +88,17 @@ const MIGRATIONS: &[&str] = &[
         forgotten_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
     "#,
+    // 5: whether an app is published to the relay, and how.
+    r#"
+    -- A column rather than a key inside `extra`, for the same reason `paused`
+    -- got one: it is queried, it is a fixed vocabulary, and burying it in a
+    -- JSON blob would make "which apps are published" a full scan and a parse.
+    --
+    -- Defaults to 'off', which is what every existing app is. Appearing in the
+    -- workspace has never put anything on the internet, and this migration
+    -- must not be the moment that changes.
+    ALTER TABLE apps ADD COLUMN relay TEXT NOT NULL DEFAULT 'off';
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

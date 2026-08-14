@@ -56,6 +56,7 @@ impl Fixture {
         Self {
             apps: vec![
                 ServedApp {
+                    relay: Default::default(),
                     slug: "trip".into(),
                     name: "Trip Planner".into(),
                     root: root.canonicalize().expect("canonicalises"),
@@ -64,6 +65,7 @@ impl Fixture {
                     paused: false,
                 },
                 ServedApp {
+                    relay: Default::default(),
                     slug: "chores".into(),
                     name: "Chores Rota".into(),
                     root: chores.canonicalize().expect("canonicalises"),

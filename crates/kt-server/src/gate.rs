@@ -6,7 +6,7 @@
 
 use axum::http::{header, HeaderMap};
 use kt_auth::{Decision, DenyReason, Device, DeviceId, RequestContext, SessionKeys};
-use kt_types::Visibility;
+use kt_types::{RelayMode, Visibility};
 
 /// The cookie carrying a session. `__Host-` would be stricter but requires
 /// HTTPS, which is not available until the local CA is trusted, so the name is
@@ -32,6 +32,12 @@ pub enum Refusal {
     /// The owner took it offline. Nothing the viewer can do about it, so the
     /// page says so plainly rather than implying they are unwelcome.
     Paused,
+    /// Asked for from outside, for an app whose owner never published it.
+    ///
+    /// Answered as a 404 rather than a 403, and that is a decision rather than
+    /// an oversight: from the internet this app genuinely does not exist, and
+    /// saying "forbidden" would confirm that it does to anybody guessing names.
+    NotPublished,
 }
 
 /// Look up the session cookie, if any, and verify it.
@@ -52,16 +58,18 @@ pub fn session_device(headers: &HeaderMap, keys: &SessionKeys, now: i64) -> Opti
 pub fn gate(
     visibility: Visibility,
     paused: bool,
+    relay: RelayMode,
     device: Option<&Device>,
     ctx: &RequestContext,
 ) -> Gated {
-    match kt_auth::decide(visibility, paused, device, ctx) {
+    match kt_auth::decide(visibility, paused, relay, device, ctx) {
         Decision::Allow => Gated::Serve,
         Decision::NeedsPairing => Gated::Waiting,
         Decision::Deny(DenyReason::WrongNetwork) => Gated::Refused(Refusal::WrongNetwork),
         Decision::Deny(DenyReason::DeviceRevoked) => Gated::Refused(Refusal::Revoked),
         Decision::Deny(DenyReason::NotTheOwner) => Gated::Refused(Refusal::NotShared),
         Decision::Deny(DenyReason::Paused) => Gated::Refused(Refusal::Paused),
+        Decision::Deny(DenyReason::NotPublished) => Gated::Refused(Refusal::NotPublished),
     }
 }
 
@@ -166,7 +174,10 @@ mod tests {
     #[test]
     fn an_unknown_device_on_an_invited_app_waits_rather_than_being_refused() {
         let ctx = RequestContext::default();
-        assert_eq!(gate(Visibility::Invited, false, None, &ctx), Gated::Waiting);
+        assert_eq!(
+            gate(Visibility::Invited, false, RelayMode::Off, None, &ctx),
+            Gated::Waiting
+        );
     }
 
     #[test]
@@ -176,11 +187,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            gate(Visibility::Network, false, None, &away),
+            gate(Visibility::Network, false, RelayMode::Off, None, &away),
             Gated::Refused(Refusal::WrongNetwork)
         );
         assert_eq!(
-            gate(Visibility::Private, false, None, &away),
+            gate(Visibility::Private, false, RelayMode::Off, None, &away),
             Gated::Refused(Refusal::NotShared)
         );
 
@@ -190,7 +201,13 @@ mod tests {
             ..revoked
         };
         assert_eq!(
-            gate(Visibility::Public, false, Some(&revoked), &away),
+            gate(
+                Visibility::Public,
+                false,
+                RelayMode::Off,
+                Some(&revoked),
+                &away
+            ),
             Gated::Refused(Refusal::Revoked)
         );
     }
@@ -208,7 +225,7 @@ mod tests {
             Visibility::Public,
         ] {
             assert_eq!(
-                gate(visibility, false, None, &local),
+                gate(visibility, false, RelayMode::Off, None, &local),
                 Gated::Serve,
                 "{visibility:?}"
             );

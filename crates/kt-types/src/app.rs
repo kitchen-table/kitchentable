@@ -71,6 +71,15 @@ pub struct AppManifest {
     /// keeps its links and its devices, and simply does not answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Whether this app is reachable from outside the local network, and how.
+    ///
+    /// Beside `visibility` for the same reasons `paused` is, and orthogonal to
+    /// it for a reason worth stating: **visibility says who may open an app;
+    /// the relay says whether it leaves the house.** An app can be Public on
+    /// the local network and unreachable from the internet, which is what
+    /// `Off` means and what every app means until somebody decides otherwise.
+    #[serde(default, skip_serializing_if = "RelayMode::is_off")]
+    pub relay: RelayMode,
     /// Unknown keys are preserved verbatim so a manifest written by a newer
     /// daemon survives a round-trip through an older one.
     #[serde(flatten)]
@@ -79,6 +88,70 @@ pub struct AppManifest {
 
 fn default_entry() -> String {
     "index.html".to_string()
+}
+
+/// Whether an app is reachable away from home, and on what terms.
+///
+/// The two modes are not a performance setting. They are the resolution of a
+/// promise the product could not keep twice: serving a snapshot while the
+/// owner's machine sleeps requires the edge to hold servable plaintext, and
+/// end-to-end encryption requires that it cannot. Both cannot be true of the
+/// same app, so the owner chooses per app, at the moment they switch the relay
+/// on - never by a silent default for the sensitive case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum RelayMode {
+    /// Not reachable from outside this network. The resting state of every app
+    /// that has never been published, and the reason a folder appearing in the
+    /// workspace puts nothing on the internet.
+    #[default]
+    Off,
+    /// TLS terminates at the edge, which can therefore serve a snapshot while
+    /// this machine is asleep - and can technically read the app. Honest
+    /// marketing is "encrypted in transit and at rest", not "end to end".
+    Standard,
+    /// The edge routes ciphertext by hostname and terminates nothing, so it
+    /// cannot read the app even in principle. The cost is that there is no
+    /// snapshot: offline means offline.
+    Strict,
+}
+
+impl RelayMode {
+    pub const fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+
+    /// Whether a request that arrived over the relay may be served at all.
+    ///
+    /// Deliberately not the same question as which mode it is: everything
+    /// downstream of here cares only that the owner published this app.
+    pub const fn is_published(&self) -> bool {
+        !self.is_off()
+    }
+
+    /// The label shown to people.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Standard => "Standard",
+            Self::Strict => "Strict",
+        }
+    }
+
+    /// What switching the relay on should default to for a given visibility.
+    ///
+    /// Invited apps are somebody's private thing shared with named people, so
+    /// they default to the mode where the operator cannot read them. Public
+    /// apps are already public, so they default to the mode that keeps the
+    /// link alive when the laptop shuts. The owner can always override; this
+    /// only decides which radio button starts selected.
+    pub const fn suggested_for(visibility: Visibility) -> Self {
+        match visibility {
+            Visibility::Public => Self::Standard,
+            _ => Self::Strict,
+        }
+    }
 }
 
 /// An app as the daemon holds it: the manifest, plus where it lives.
@@ -235,6 +308,7 @@ mod tests {
     fn record() -> AppRecord {
         AppRecord {
             manifest: AppManifest {
+                relay: RelayMode::Off,
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
                 icon: None,

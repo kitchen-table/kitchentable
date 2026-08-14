@@ -259,6 +259,33 @@ async fn run() -> Result<(), StartupError> {
         "kitchen table is serving"
     );
 
+    // Choose a cryptography provider before anything can open a TLS connection.
+    //
+    // rustls 0.23 will not guess when zero or two are compiled in; it returns
+    // an error at the first handshake instead. Nothing here caught that,
+    // because the relay's tests use a stub edge on plain `ws://` - deliberately,
+    // so that a test does not have to stand up a certificate authority - so the
+    // first real `wss://` dial was the first TLS this code had ever done.
+    //
+    // Installed rather than left to feature detection so the choice is visible
+    // in one place and cannot be changed by a dependency enabling the other.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a cryptography provider was already installed");
+    }
+
+    // Which public names this machine answers to. A placeholder for the handle
+    // claim that arrives with account linking, in the same spirit as
+    // KT_RELAY_URL - and, like it, absent on every install today. Without one
+    // the daemon resolves no relay hostname at all, which is correct: nothing
+    // has been published.
+    if let Some((handle, domain)) = relay_handle() {
+        tracing::info!(%handle, %domain, "relay hostnames configured");
+        library.set_relay_identity(Some((handle, domain)));
+    }
+
     let app = kt_server::router(library, trust, presence_for_http);
 
     // Dial the relay, if this install has one and knows who it is.
@@ -417,6 +444,34 @@ fn fingerprint(record: &AppRecord) -> AppFingerprint {
 /// An origin with the port left off when it is the default, because a URL
 /// someone reads aloud or texts to a family member should be as short as it
 /// can honestly be.
+/// This install's handle and the domain its apps hang off, if it has been told.
+///
+/// `KT_RELAY_HANDLE=adarsh` plus an optional `KT_RELAY_DOMAIN`, defaulting to
+/// the one the product uses. Both are placeholders for the handle claim that
+/// arrives with account linking; neither is set on any install today.
+///
+/// A handle containing a hyphen or a dot is refused rather than used: hostnames
+/// split at the last hyphen, so a handle with one in it makes every name
+/// ambiguous. Better to answer nothing than to answer the wrong app.
+fn relay_handle() -> Option<(String, String)> {
+    let handle = std::env::var("KT_RELAY_HANDLE").ok()?;
+    let handle = handle.trim().to_ascii_lowercase();
+    if handle.is_empty() || handle.contains('-') || handle.contains('.') {
+        if !handle.is_empty() {
+            tracing::warn!(%handle, "a relay handle may not contain a hyphen or a dot; ignoring it");
+        }
+        return None;
+    }
+
+    let domain = std::env::var("KT_RELAY_DOMAIN")
+        .ok()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "kitchentable.cloud".to_string());
+
+    Some((handle, domain))
+}
+
 fn origin_for(host: &str, port: u16) -> String {
     if port == 80 {
         format!("http://{host}")

@@ -11,7 +11,7 @@
 //! without minting power is the property that lets snapshots be served safely
 //! (server-architecture.md section 3).
 
-use kt_types::Visibility;
+use kt_types::{RelayMode, Visibility};
 
 pub mod device;
 pub mod invite;
@@ -30,6 +30,14 @@ pub struct RequestContext {
     pub on_household_network: bool,
     /// Whether this request came from the owner's own machine (loopback).
     pub is_loopback: bool,
+    /// Whether this request arrived over the relay - that is, from the
+    /// internet, by way of a server in a datacentre.
+    ///
+    /// It is never inferred here. `Peer::context` in kt-server sets it, and it
+    /// only ever takes trust away: a relayed request already arrives with
+    /// `on_household_network` and `is_loopback` false by construction, and this
+    /// field is what additionally requires the owner to have published the app.
+    pub arrived_by_relay: bool,
 }
 
 /// What the gate decided.
@@ -54,6 +62,14 @@ pub enum DenyReason {
     DeviceRevoked,
     /// The owner took the app offline. Nothing to do with who is asking.
     Paused,
+    /// The app exists and is perfectly healthy, but its owner has not published
+    /// it to the relay - so from outside this network it does not exist.
+    ///
+    /// Distinct from every other reason here because it is not about the
+    /// caller at all, and because the honest answer to the internet is that
+    /// there is nothing at this address rather than that there is something
+    /// they may not have.
+    NotPublished,
 }
 
 /// Decide whether a request may open an app.
@@ -65,6 +81,7 @@ pub enum DenyReason {
 pub fn decide(
     visibility: Visibility,
     paused: bool,
+    relay: RelayMode,
     device: Option<&Device>,
     ctx: &RequestContext,
 ) -> Decision {
@@ -73,6 +90,18 @@ pub fn decide(
     // which is why it is checked before anything is known about them.
     if paused {
         return Decision::Deny(DenyReason::Paused);
+    }
+
+    // Nothing leaves the house unless its owner said so. Checked here, before
+    // anything about the caller is examined, because - like pausing - it is a
+    // fact about the app rather than about who is asking.
+    //
+    // This is what stops a folder appearing in the workspace from appearing on
+    // the internet. Visibility decides who may open an app; this decides
+    // whether the question can even be asked from outside, and no combination
+    // of visibility, device or invite gets round it.
+    if ctx.arrived_by_relay && !relay.is_published() {
+        return Decision::Deny(DenyReason::NotPublished);
     }
 
     // A revoked device is refused everywhere, whatever the level says.
@@ -121,8 +150,8 @@ pub fn decide(
             }
         },
 
-        // Only meaningful once the relay is on; locally it behaves like
-        // Household without the network check.
+        // Anyone with the URL. Which URLs exist is the relay's question, asked
+        // above: off the relay this is the local network, and on it, anywhere.
         Visibility::Public => Decision::Allow,
     }
 }
@@ -138,6 +167,7 @@ mod matrix {
     fn ctx(loopback: bool, household: bool) -> RequestContext {
         RequestContext {
             session: None,
+            arrived_by_relay: false,
             on_household_network: household,
             is_loopback: loopback,
         }
@@ -159,6 +189,54 @@ mod matrix {
         use Visibility::*;
 
         for visibility in [Private, Network, Invited, Public] {
+            for relay in [RelayMode::Off, RelayMode::Standard, RelayMode::Strict] {
+                for status in [
+                    None,
+                    Some(DeviceStatus::Owner),
+                    Some(DeviceStatus::Approved),
+                    Some(DeviceStatus::Pending),
+                    Some(DeviceStatus::Revoked),
+                ] {
+                    for loopback in [true, false] {
+                        for household in [true, false] {
+                            let device = status.map(device);
+                            let got = decide(
+                                visibility,
+                                true,
+                                relay,
+                                device.as_ref(),
+                                &ctx(loopback, household),
+                            );
+                            assert_eq!(
+                            got,
+                            Decision::Deny(DenyReason::Paused),
+                            "{visibility:?}/{status:?}/loopback={loopback}/household={household} \
+                             should be refused while paused"
+                        );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// An unpublished app is not reachable from the internet, whatever else is
+    /// true of it.
+    ///
+    /// The same shape as the pausing test above, and the same claim: the relay
+    /// is not a visibility level, it is a switch, and no combination of
+    /// visibility, device, invite or network gets round it. This is what stops
+    /// a folder appearing in somebody's workspace from appearing on the
+    /// internet.
+    ///
+    /// Note the refusal is `NotPublished` rather than any of the others - it
+    /// renders as a 404, because from outside the app genuinely does not exist
+    /// and saying "forbidden" would confirm to a stranger that it does.
+    #[test]
+    fn an_unpublished_app_is_refused_every_relayed_request() {
+        use Visibility::*;
+
+        for visibility in [Private, Network, Invited, Public] {
             for status in [
                 None,
                 Some(DeviceStatus::Owner),
@@ -166,16 +244,93 @@ mod matrix {
                 Some(DeviceStatus::Pending),
                 Some(DeviceStatus::Revoked),
             ] {
-                for loopback in [true, false] {
-                    for household in [true, false] {
-                        let device = status.map(device);
-                        let got =
-                            decide(visibility, true, device.as_ref(), &ctx(loopback, household));
+                let device = status.map(device);
+                let mut relayed = ctx(false, false);
+                relayed.arrived_by_relay = true;
+
+                assert_eq!(
+                    decide(visibility, false, RelayMode::Off, device.as_ref(), &relayed),
+                    Decision::Deny(DenyReason::NotPublished),
+                    "{visibility:?}/{status:?} arriving over the relay should be refused \
+                     while the app is unpublished"
+                );
+            }
+        }
+    }
+
+    /// Publishing an app does not publish the ones beside it.
+    ///
+    /// The switch is per app, so the only thing that changes for a relayed
+    /// request is the app that was switched on. Both modes behave identically
+    /// here: Standard and Strict differ in how bytes travel, never in who may
+    /// have them.
+    #[test]
+    fn publishing_changes_nothing_about_who_may_open_it() {
+        use Visibility::*;
+
+        for relay in [RelayMode::Standard, RelayMode::Strict] {
+            let mut relayed = ctx(false, false);
+            relayed.arrived_by_relay = true;
+
+            // Public is the level that exists to be reachable by anyone.
+            assert_eq!(
+                decide(Public, false, relay, None, &relayed),
+                Decision::Allow,
+                "a published Public app should be served over the relay"
+            );
+
+            // Invited still means invited. Publishing an app does not approve
+            // anybody's device, and an unknown viewer gets the pairing flow
+            // rather than the app.
+            assert_eq!(
+                decide(Invited, false, relay, None, &relayed),
+                Decision::NeedsPairing
+            );
+            assert_eq!(
+                decide(
+                    Invited,
+                    false,
+                    relay,
+                    Some(&device(DeviceStatus::Approved)),
+                    &relayed
+                ),
+                Decision::Allow
+            );
+
+            // And the two levels that are about *place* remain unreachable
+            // from anywhere else, which is why the UI does not offer them the
+            // relay at all. Publishing one cannot make it work.
+            assert_eq!(
+                decide(Network, false, relay, None, &relayed),
+                Decision::Deny(DenyReason::WrongNetwork)
+            );
+            assert_eq!(
+                decide(Private, false, relay, None, &relayed),
+                Decision::Deny(DenyReason::NotTheOwner)
+            );
+        }
+    }
+
+    /// A request that did not arrive over the relay is unaffected by the switch.
+    ///
+    /// The free tier is the whole product for most people, and it must not
+    /// change because a paid feature exists.
+    #[test]
+    fn local_requests_do_not_care_whether_the_relay_is_on() {
+        use Visibility::*;
+
+        for visibility in [Private, Network, Invited, Public] {
+            for loopback in [true, false] {
+                for household in [true, false] {
+                    let local = ctx(loopback, household);
+                    let baseline = decide(visibility, false, RelayMode::Off, None, &local);
+
+                    for relay in [RelayMode::Standard, RelayMode::Strict] {
                         assert_eq!(
-                            got,
-                            Decision::Deny(DenyReason::Paused),
-                            "{visibility:?}/{status:?}/loopback={loopback}/household={household} \
-                             should be refused while paused"
+                            decide(visibility, false, relay, None, &local),
+                            baseline,
+                            "{visibility:?}/loopback={loopback}/household={household} \
+                             changed answer because the relay was {relay:?}"
                         );
                     }
                 }
@@ -265,6 +420,7 @@ mod matrix {
             let got = decide(
                 *visibility,
                 false,
+                RelayMode::Off,
                 device.as_ref(),
                 &ctx(*loopback, *household),
             );
@@ -288,7 +444,13 @@ mod matrix {
         ] {
             let revoked = device(DeviceStatus::Revoked);
             assert_eq!(
-                decide(visibility, false, Some(&revoked), &ctx(false, true)),
+                decide(
+                    visibility,
+                    false,
+                    RelayMode::Off,
+                    Some(&revoked),
+                    &ctx(false, true)
+                ),
                 Decision::Deny(DenyReason::DeviceRevoked),
                 "{visibility:?} let a revoked device through"
             );
@@ -301,7 +463,13 @@ mod matrix {
         // everyone but the owner. This is the property that makes dropping a
         // folder into the workspace safe.
         assert_eq!(
-            decide(Visibility::default(), false, None, &ctx(false, true)),
+            decide(
+                Visibility::default(),
+                false,
+                RelayMode::Off,
+                None,
+                &ctx(false, true)
+            ),
             Decision::Deny(DenyReason::NotTheOwner)
         );
     }

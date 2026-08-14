@@ -201,6 +201,23 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&serde_json::json!({ "slug": slug, "visibility": raw }))
         }
 
+        // Publishing an app is a separate decision from who may open it, and
+        // deliberately a separate call. Nothing about changing a visibility
+        // level should be able to put an app on the internet as a side effect.
+        "share.set_relay" => {
+            let slug = string_param(request, "slug")?;
+            let raw = string_param(request, "mode")?;
+            let mode = parse_relay_mode(&raw)?;
+
+            let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+            write_relay(&record.path, mode).map_err(|e| KtError {
+                code: ErrorCode::Io,
+                message: format!("could not update the manifest: {e}"),
+                detail: None,
+            })?;
+            json(&serde_json::json!({ "slug": slug, "relay": raw }))
+        }
+
         "share.create_invite" => {
             let slug = string_param(request, "slug")?;
             if ctx.library.record(&slug).is_none() {
@@ -456,6 +473,41 @@ fn write_paused(path: &str, paused: bool) -> std::io::Result<()> {
     std::fs::write(&manifest_path, format!("{pretty}\n"))
 }
 
+fn parse_relay_mode(raw: &str) -> Result<kt_types::RelayMode, KtError> {
+    use kt_types::RelayMode::*;
+    match raw {
+        "off" => Ok(Off),
+        "standard" => Ok(Standard),
+        "strict" => Ok(Strict),
+        other => Err(KtError {
+            code: ErrorCode::BadRequest,
+            message: format!("{other:?} is not a relay mode"),
+            detail: None,
+        }),
+    }
+}
+
+/// Written to the manifest, not only the database, for the same reason
+/// visibility is: `app.json` is the source of truth and the watcher picks it
+/// up. A value that lived only in the database would disagree with the folder
+/// the moment anybody edited it.
+fn write_relay(path: &str, mode: kt_types::RelayMode) -> std::io::Result<()> {
+    let manifest_path = std::path::Path::new(path).join("app.json");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    manifest["relay"] = serde_json::json!(match mode {
+        kt_types::RelayMode::Off => "off",
+        kt_types::RelayMode::Standard => "standard",
+        kt_types::RelayMode::Strict => "strict",
+    });
+
+    let pretty = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&manifest_path, format!("{pretty}\n"))
+}
+
 fn write_visibility(path: &str, visibility: kt_types::Visibility) -> std::io::Result<()> {
     let manifest_path = std::path::Path::new(path).join("app.json");
     let raw = std::fs::read_to_string(&manifest_path)?;
@@ -629,6 +681,7 @@ mod tests {
         let dir = std::env::temp_dir().display().to_string();
         library.replace(vec![AppRecord::unmeasured(
             AppManifest {
+                relay: Default::default(),
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
                 icon: None,
