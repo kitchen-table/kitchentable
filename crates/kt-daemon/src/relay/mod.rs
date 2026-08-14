@@ -32,12 +32,102 @@ mod session;
 mod stub;
 mod wsbytes;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use kt_tunnel_proto::{InstallIdentity, Retry};
 
 pub use backoff::Backoff;
 pub use conn::Ended;
+
+/// Whether this machine is currently reachable from the internet.
+///
+/// A published app is only actually reachable while the tunnel is up, and for a
+/// long time nothing anywhere said which. The window rendered a green ON badge
+/// from the manifest - from the owner's *intention* - so an app that had been
+/// silently unreachable for an hour looked perfectly healthy, and the way you
+/// found out was a stranger telling you the link was broken.
+///
+/// This is the fact the badge should have been reading.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RelayState {
+    /// No relay configured. Every install today, and not a fault: the free
+    /// tier is the whole product for most people.
+    #[default]
+    Off,
+    /// Dialling, or waiting to dial again after a drop.
+    Connecting,
+    /// Up. Published apps are reachable at their public addresses.
+    Connected,
+    /// Stopped trying, because waiting cannot fix it - a revoked install, an
+    /// unlinked one, a version the edge will not speak. Somebody has to act,
+    /// so the message is meant to be shown.
+    NeedsAttention(String),
+}
+
+impl From<RelayState> for kt_types::RelayState {
+    /// The internal state is the same shape as the wire one and deliberately a
+    /// separate type: this module should not have to care that `sys.status`
+    /// exists, and the wire type should not change because a field here did.
+    fn from(state: RelayState) -> Self {
+        match state {
+            RelayState::Off => Self::Off,
+            RelayState::Connecting => Self::Connecting,
+            RelayState::Connected => Self::Connected,
+            RelayState::NeedsAttention(message) => Self::NeedsAttention { message },
+        }
+    }
+}
+
+/// The current [`RelayState`], shared between the relay task and `sys.status`.
+///
+/// A lock rather than an event because the question "is it up *now*" has to be
+/// answerable by anyone who asks at any time, including a window that has just
+/// opened and missed every transition so far.
+#[derive(Debug, Default)]
+pub struct RelayStatus(RwLock<RelayState>);
+
+impl RelayStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> RelayState {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Returns whether this changed anything, so a caller can avoid announcing
+    /// a transition that did not happen - a reconnect that fails four times
+    /// should not push four identical events at the window.
+    pub fn set(&self, state: RelayState) -> bool {
+        let mut current = self.0.write().unwrap_or_else(|e| e.into_inner());
+        let changed = *current != state;
+        *current = state;
+        changed
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn an_unconfigured_relay_is_off_rather_than_unknown() {
+        // Every install today. "Off" is an answer the window can render; the
+        // absence of one is a spinner that never resolves.
+        assert_eq!(RelayStatus::new().get(), RelayState::Off);
+    }
+
+    #[test]
+    fn only_a_real_transition_is_announced() {
+        // A reconnect that fails four times passes through Connecting four
+        // times. Pushing four identical events would make a quiet retry look
+        // like a machine thrashing.
+        let status = RelayStatus::new();
+        assert!(status.set(RelayState::Connecting), "off -> connecting");
+        assert!(!status.set(RelayState::Connecting), "no change, no event");
+        assert!(status.set(RelayState::Connected), "connecting -> connected");
+    }
+}
 
 /// Where to dial, and as whom.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +162,23 @@ impl Config {
 /// Spawned rather than awaited by the daemon: the relay being down must never
 /// be the reason apps stop being served on the local network, which is the
 /// whole product for anyone who has not paid for anything.
-pub async fn run(config: Config, identity: Arc<InstallIdentity>, router: Arc<axum::Router>) {
+pub async fn run(
+    config: Config,
+    identity: Arc<InstallIdentity>,
+    router: Arc<axum::Router>,
+    status: Arc<RelayStatus>,
+    on_change: impl Fn(RelayState) + Send + 'static,
+) {
     let mut backoff = Backoff::new();
+    // One place the state is written, so the window can never be told
+    // something the loop does not believe.
+    let announce = |state: RelayState| {
+        if status.set(state.clone()) {
+            on_change(state);
+        }
+    };
+
+    announce(RelayState::Connecting);
 
     loop {
         let ended = match conn::connect(&config.url, &identity).await {
@@ -87,6 +192,7 @@ pub async fn run(config: Config, identity: Arc<InstallIdentity>, router: Arc<axu
                     install = %accepted.install,
                     "relay connected"
                 );
+                announce(RelayState::Connected);
 
                 let ended = carry(socket, Arc::clone(&router)).await;
                 tracing::debug!("the relay connection ended: {ended}");
@@ -105,8 +211,14 @@ pub async fn run(config: Config, identity: Arc<InstallIdentity>, router: Arc<axu
 
         let Some(delay) = backoff.next_delay(retry) else {
             tracing::warn!("not dialling the relay again: {ended}");
+            announce(RelayState::NeedsAttention(ended.to_string()));
             return;
         };
+
+        // Between a drop and the next attempt an app is genuinely unreachable,
+        // and saying "connected" through it would be the same lie in a smaller
+        // window.
+        announce(RelayState::Connecting);
 
         if retry == Retry::Backoff {
             tracing::debug!(seconds = delay.as_secs(), "waiting before dialling again");
@@ -122,21 +234,55 @@ pub async fn run(config: Config, identity: Arc<InstallIdentity>, router: Arc<axu
 /// questions, and the daemon dials because that is the only direction a home
 /// router allows.
 async fn carry(socket: conn::Socket, router: Arc<axum::Router>) -> Ended {
+    carry_with(socket, router, session::Heartbeat::default()).await
+}
+
+/// The body of [`carry`], with the heartbeat timings exposed.
+///
+/// Split out only so a test can run the whole silence timeout in milliseconds
+/// rather than a minute. Nothing else should pass anything but the default:
+/// the numbers are the protocol's, not this daemon's.
+async fn carry_with(
+    socket: conn::Socket,
+    router: Arc<axum::Router>,
+    beat: session::Heartbeat,
+) -> Ended {
     let mut connection = yamux::Connection::new(
         wsbytes::WsBytes::new(socket),
         yamux::Config::default(),
         yamux::Mode::Client,
     );
 
+    // How the control stream reports a tunnel that has gone quiet. Without
+    // this the heartbeat could notice and nothing would happen: the control
+    // stream runs on its own task, so its return value goes nowhere, and this
+    // loop would keep politely polling a dead connection for new streams.
+    let (ended_tx, mut ended_rx) = tokio::sync::mpsc::channel::<Ended>(1);
+
     loop {
-        match std::future::poll_fn(|cx| connection.poll_next_inbound(cx)).await {
-            Some(Ok(stream)) => {
-                // One task per stream, so a slow app cannot hold up the
-                // heartbeat or anybody else's page.
-                tokio::spawn(session::dispatch(stream, Arc::clone(&router)));
+        tokio::select! {
+            // Biased towards the verdict: once the tunnel is known to be dead
+            // there is nothing worth accepting a new stream for.
+            biased;
+
+            Some(ended) = ended_rx.recv() => return ended,
+
+            inbound = std::future::poll_fn(|cx| connection.poll_next_inbound(cx)) => {
+                match inbound {
+                    Some(Ok(stream)) => {
+                        // One task per stream, so a slow app cannot hold up the
+                        // heartbeat or anybody else's page.
+                        tokio::spawn(session::dispatch(
+                            stream,
+                            Arc::clone(&router),
+                            beat,
+                            ended_tx.clone(),
+                        ));
+                    }
+                    Some(Err(e)) => return Ended::Transport(e.to_string()),
+                    None => return Ended::Transport("the relay closed the tunnel".into()),
+                }
             }
-            Some(Err(e)) => return Ended::Transport(e.to_string()),
-            None => return Ended::Transport("the relay closed the tunnel".into()),
         }
     }
 }

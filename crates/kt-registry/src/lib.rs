@@ -172,6 +172,9 @@ impl Registry {
             // A new folder is not on the internet. Nothing about appearing in
             // the workspace publishes anything.
             relay: RelayMode::Off,
+            // Unset, not "the slug": an app that has never been renamed should
+            // follow its folder, and only an explicit edit stops that.
+            public_label: None,
             extra: serde_json::Map::new(),
         };
 

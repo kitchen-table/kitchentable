@@ -26,7 +26,10 @@ pub mod paths;
 pub mod protocol;
 pub mod status;
 
-pub use app::{App, AppManifest, AppRecord, RelayMode, Urls, Visibility};
+pub use app::{
+    normalise_public_label, App, AppManifest, AppRecord, PublicLabelError, RelayMode, Urls,
+    Visibility, MAX_DNS_LABEL,
+};
 pub use event::{Event, Viewer};
 pub use protocol::{ErrorCode, KtError, Request, Response, PROTOCOL_VERSION};
-pub use status::{DegradedReason, ServingState, SysStatus};
+pub use status::{DegradedReason, RelayState, ServingState, SysStatus};

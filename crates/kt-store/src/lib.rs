@@ -78,8 +78,8 @@ impl Store {
         let m = &record.manifest;
         let extra = serde_json::Value::Object(m.extra.clone()).to_string();
         self.lock().execute(
-            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused, relay)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(slug) DO UPDATE SET
                 name = excluded.name,
                 icon = excluded.icon,
@@ -90,6 +90,7 @@ impl Store {
                 extra = excluded.extra,
                 paused = excluded.paused,
                 relay = excluded.relay,
+                public_label = excluded.public_label,
                 updated_at = strftime('%s','now')",
             params![
                 m.slug,
@@ -102,6 +103,7 @@ impl Store {
                 extra,
                 m.paused as i64,
                 relay_str(m.relay),
+                m.public_label,
             ],
         )?;
         Ok(())
@@ -152,7 +154,7 @@ impl Store {
     pub fn list_apps(&self) -> Result<Vec<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label
              FROM apps ORDER BY name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_record(row)))?;
@@ -166,7 +168,7 @@ impl Store {
     pub fn get_app(&self, slug: &str) -> Result<Option<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label
              FROM apps WHERE slug = ?1",
         )?;
         let found = stmt
@@ -229,6 +231,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             // every index above stays where it was, which is the trap that
             // adding `paused` set (HANDOFF section 7).
             relay: relay_from_str(&row.get::<_, String>(9)?),
+            // Column 11, index 10. Appended for the same reason `relay` was.
+            public_label: row.get::<_, Option<String>>(10)?,
             extra,
         },
         row.get(6)?,
@@ -282,6 +286,7 @@ mod tests {
         AppRecord::unmeasured(
             AppManifest {
                 relay: RelayMode::Off,
+                public_label: None,
                 name: name.into(),
                 slug: slug.into(),
                 icon: None,

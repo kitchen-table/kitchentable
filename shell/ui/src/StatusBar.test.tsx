@@ -10,6 +10,7 @@ function status(over: Partial<SysStatus> = {}): SysStatus {
     serving: { state: "serving" },
     app_count: 2,
     install_key: null,
+    relay: { state: "off" },
     uptime_secs: 42,
     ...over,
   };

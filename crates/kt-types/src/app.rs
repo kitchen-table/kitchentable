@@ -80,6 +80,18 @@ pub struct AppManifest {
     /// `Off` means and what every app means until somebody decides otherwise.
     #[serde(default, skip_serializing_if = "RelayMode::is_off")]
     pub relay: RelayMode,
+    /// What this app is called in its public address, when the owner has
+    /// chosen something other than the slug.
+    ///
+    /// A separate name from `slug` on purpose. The slug is how this machine
+    /// routes - `chores-rota.local`, `/chores-rota/`, the store key - and it
+    /// follows the folder. The public label is a promise made to whoever was
+    /// sent the link, so renaming a folder must not break it and changing the
+    /// public address must not move the app on the local network.
+    ///
+    /// `None` means "use the slug", which is every app until somebody edits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_label: Option<String>,
     /// Unknown keys are preserved verbatim so a manifest written by a newer
     /// daemon survives a round-trip through an older one.
     #[serde(flatten)]
@@ -88,6 +100,18 @@ pub struct AppManifest {
 
 fn default_entry() -> String {
     "index.html".to_string()
+}
+
+impl AppManifest {
+    /// What this app actually answers to in a public address.
+    ///
+    /// The slug until somebody edits it. One accessor rather than
+    /// `public_label.unwrap_or(slug)` scattered about, because the two names
+    /// are easy to confuse and getting it wrong means the daemon builds a URL
+    /// it will not itself answer to.
+    pub fn effective_public_label(&self) -> &str {
+        self.public_label.as_deref().unwrap_or(&self.slug)
+    }
 }
 
 /// Whether an app is reachable away from home, and on what terms.
@@ -154,6 +178,96 @@ impl RelayMode {
     }
 }
 
+/// The longest a single DNS label may be. A public hostname is
+/// `<label>-<handle>.<domain>`, and `<label>-<handle>` is one label.
+pub const MAX_DNS_LABEL: usize = 63;
+
+/// Why a public address the owner typed cannot be used.
+///
+/// Separate variants rather than one string because the window has to say
+/// which rule was broken next to the field, and "invalid" next to a text box is
+/// the least useful thing a form can say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicLabelError {
+    Empty,
+    /// Contains something that is not a letter, digit or hyphen.
+    BadCharacter(char),
+    /// A DNS label may not begin or end with a hyphen.
+    EdgeHyphen,
+    /// `<label>-<handle>` would exceed [`MAX_DNS_LABEL`].
+    TooLong {
+        max: usize,
+    },
+    /// Another app on this machine already answers to it. Two apps sharing a
+    /// public name means one of them is unreachable, silently.
+    Taken {
+        slug: String,
+    },
+}
+
+impl PublicLabelError {
+    /// A sentence that can be shown under the field as-is.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Empty => "An address needs at least one character.".into(),
+            Self::BadCharacter(c) => {
+                format!("‘{c}’ can't be in a web address. Use letters, numbers and hyphens.")
+            }
+            Self::EdgeHyphen => "An address can't start or end with a hyphen.".into(),
+            Self::TooLong { max } => {
+                format!("That's too long. Keep it to {max} characters or fewer.")
+            }
+            Self::Taken { slug } => {
+                format!("‘{slug}’ already uses that address. Pick another.")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PublicLabelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for PublicLabelError {}
+
+/// Check and normalise a public address the owner typed.
+///
+/// Hostnames are case-insensitive and whitespace around a pasted value is an
+/// accident, so both are absorbed rather than refused. Everything else is a
+/// real refusal, because the result becomes a DNS name.
+///
+/// Hyphens *inside* the label are fine, and deliberately so: the hostname
+/// splits at its **last** hyphen and a handle may never contain one, so
+/// `trip-briefing-html-template-adarsh` is unambiguous. Only the edges are
+/// refused, which is a DNS rule rather than one of ours.
+pub fn normalise_public_label(raw: &str, handle: &str) -> Result<String, PublicLabelError> {
+    let label = raw.trim().to_ascii_lowercase();
+
+    if label.is_empty() {
+        return Err(PublicLabelError::Empty);
+    }
+    if let Some(c) = label
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '-')
+    {
+        return Err(PublicLabelError::BadCharacter(c));
+    }
+    if label.starts_with('-') || label.ends_with('-') {
+        return Err(PublicLabelError::EdgeHyphen);
+    }
+
+    // The handle and its joining hyphen are spent before the owner types a
+    // character, so the limit shown is the one that applies to *this* install.
+    let max = MAX_DNS_LABEL.saturating_sub(handle.len() + 1);
+    if label.len() > max {
+        return Err(PublicLabelError::TooLong { max });
+    }
+
+    Ok(label)
+}
+
 /// An app as the daemon holds it: the manifest, plus where it lives.
 ///
 /// The persistent half. URLs are deliberately absent because they depend on the
@@ -215,12 +329,21 @@ impl AppRecord {
             visibility: m.visibility,
             version: m.version,
             paused: m.paused,
+            relay: m.relay,
             url: match &urls.hostname {
                 Some(host) => format!("{}://{host}{}", urls.scheme, urls.port_suffix),
                 None => prefix_url.clone(),
             },
             hostname: urls.hostname.clone(),
             fallback_url: format!("{}/{}", urls.fallback_origin, m.slug),
+            // Only for an app whose owner has published it. An unpublished app
+            // has no public URL because it is not on the internet, and showing
+            // one that 404s would be a worse lie than showing nothing.
+            public_url: match (m.relay.is_published(), &urls.public_host) {
+                (true, Some(host)) => Some(format!("https://{host}")),
+                _ => None,
+            },
+            public_label: m.effective_public_label().to_string(),
             path: self.path.clone(),
             // Saturating rather than wrapping: ts-rs maps u64 to bigint, which
             // JSON cannot carry, so these cross the wire as u32. An app folder
@@ -246,6 +369,13 @@ pub struct Urls {
     pub prefix_origin: String,
     /// Origin that always resolves: the machine's IP and port.
     pub fallback_origin: String,
+    /// The public name this app would answer to away from home, e.g.
+    /// `trip-adarsh.kitchentable.cloud`. `None` until an account claims a
+    /// handle, which is every install today.
+    ///
+    /// Carries no opinion about whether the app is published. Whether it is
+    /// *shown* is [`RelayMode`]'s question, resolved in [`AppRecord::to_app`].
+    pub public_host: Option<String>,
 }
 
 /// An app as clients see it: the manifest plus what the daemon knows about
@@ -265,6 +395,13 @@ pub struct App {
     /// people, but answering nobody until it is resumed.
     #[serde(default)]
     pub paused: bool,
+    /// Whether this app is reachable away from home, and on what terms.
+    ///
+    /// Carried here and not only in the manifest because the window has to be
+    /// able to say which of the two promises is in force. A relay switch that
+    /// can be set but not read would show every published app as unpublished.
+    #[serde(default)]
+    pub relay: RelayMode,
     /// Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
     /// prefix URL when nothing was announced.
     pub url: String,
@@ -277,6 +414,22 @@ pub struct App {
     /// Always-available IP-and-port URL, for networks where mDNS does not
     /// resolve. Android is the usual reason (docs/architecture.md section 10).
     pub fallback_url: String,
+    /// Where this app answers from away from home, once its owner has
+    /// published it and an account has claimed a handle.
+    ///
+    /// Absent means there is no public URL to show - either the relay is off
+    /// for this app, or this install has no handle yet. Both are true of every
+    /// app until somebody decides otherwise, and neither is an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub public_url: Option<String>,
+    /// The editable part of the public address: everything before `-<handle>`.
+    ///
+    /// Always present, and equal to the slug until somebody edits it, so the
+    /// window can prefill the field whether or not this app has ever been
+    /// published. What it is *joined to* is install-level and comes from
+    /// `sys.status`, because one handle covers every app on this machine.
+    pub public_label: String,
     /// Absolute path to the app folder in the workspace.
     pub path: String,
     /// Bundle size in bytes, for the Overview tab. Saturates at `u32::MAX`.
@@ -302,6 +455,7 @@ mod tests {
             port_suffix: String::new(),
             prefix_origin: "http://localhost".into(),
             fallback_origin: "http://192.168.1.24:8420".into(),
+            public_host: None,
         }
     }
 
@@ -309,6 +463,7 @@ mod tests {
         AppRecord {
             manifest: AppManifest {
                 relay: RelayMode::Off,
+                public_label: None,
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
                 icon: None,
@@ -353,6 +508,145 @@ mod tests {
         let mut u = urls(Some("trip-planner.local"));
         u.port_suffix = ":8420".into();
         assert_eq!(record().to_app(&u).url, "http://trip-planner.local:8420");
+    }
+
+    #[test]
+    fn an_address_is_normalised_rather_than_refused_where_it_safely_can_be() {
+        // Hostnames are case-insensitive and whitespace round a pasted value is
+        // an accident. Refusing either would be pedantry at somebody typing.
+        assert_eq!(
+            normalise_public_label("  Trip-Briefing  ", "adarsh"),
+            Ok("trip-briefing".to_string())
+        );
+    }
+
+    #[test]
+    fn hyphens_inside_an_address_are_fine_and_only_the_edges_are_not() {
+        // The hostname splits at its LAST hyphen and a handle may never contain
+        // one, so interior hyphens are unambiguous. Edge hyphens are a DNS rule.
+        assert!(normalise_public_label("trip-briefing-html-template", "adarsh").is_ok());
+        assert_eq!(
+            normalise_public_label("-trip", "adarsh"),
+            Err(PublicLabelError::EdgeHyphen)
+        );
+        assert_eq!(
+            normalise_public_label("trip-", "adarsh"),
+            Err(PublicLabelError::EdgeHyphen)
+        );
+    }
+
+    #[test]
+    fn an_address_that_would_not_survive_dns_is_refused_with_the_reason() {
+        assert_eq!(
+            normalise_public_label("", "adarsh"),
+            Err(PublicLabelError::Empty)
+        );
+        assert_eq!(
+            normalise_public_label("my trip", "adarsh"),
+            Err(PublicLabelError::BadCharacter(' '))
+        );
+        assert_eq!(
+            normalise_public_label("trip.briefing", "adarsh"),
+            Err(PublicLabelError::BadCharacter('.')),
+            "a dot would make it two labels and fall outside the wildcard cert"
+        );
+    }
+
+    #[test]
+    fn the_length_limit_counts_the_handle_the_owner_did_not_type() {
+        // `<label>-<handle>` is one DNS label. The handle and its joining
+        // hyphen are spent before a character is typed, so the number shown has
+        // to be the one that actually applies to this install.
+        let max = MAX_DNS_LABEL - "adarsh".len() - 1;
+        assert!(normalise_public_label(&"a".repeat(max), "adarsh").is_ok());
+        assert_eq!(
+            normalise_public_label(&"a".repeat(max + 1), "adarsh"),
+            Err(PublicLabelError::TooLong { max })
+        );
+
+        // And a longer handle leaves less room, rather than the limit being a
+        // constant that happens to be right for one person's name.
+        let roomier = MAX_DNS_LABEL - "jo".len() - 1;
+        assert!(normalise_public_label(&"a".repeat(roomier), "jo").is_ok());
+    }
+
+    #[test]
+    fn an_app_answers_to_its_slug_until_somebody_renames_it() {
+        let mut m = record().manifest;
+        assert_eq!(m.effective_public_label(), "trip-planner");
+
+        m.public_label = Some("holiday".into());
+        assert_eq!(m.effective_public_label(), "holiday");
+    }
+
+    #[test]
+    fn only_a_published_app_has_a_public_url() {
+        // The name exists for every app on a machine with a handle - that is
+        // the whole point of one entry in the edge covering all of them. What
+        // decides whether anyone is shown it is whether the owner published it.
+        let mut u = urls(Some("trip-planner.local"));
+        u.public_host = Some("trip-planner-adarsh.kitchentable.cloud".into());
+
+        let mut r = record();
+        assert_eq!(r.to_app(&u).public_url, None, "off means no public URL");
+
+        r.manifest.relay = RelayMode::Standard;
+        assert_eq!(
+            r.to_app(&u).public_url.as_deref(),
+            Some("https://trip-planner-adarsh.kitchentable.cloud")
+        );
+    }
+
+    #[test]
+    fn an_install_with_no_handle_shows_no_public_url_however_published() {
+        // Every install today. Publishing without a handle is a real state and
+        // not an error, so it shows nothing rather than a half-formed name.
+        let mut r = record();
+        r.manifest.relay = RelayMode::Standard;
+        assert_eq!(r.to_app(&urls(None)).public_url, None);
+    }
+
+    #[test]
+    fn the_public_url_is_https_because_the_edge_terminates_tls() {
+        // The local scheme is http and says so. The relay is not the local
+        // listener, so it must not inherit that.
+        let mut u = urls(None);
+        u.public_host = Some("trip-planner-adarsh.kitchentable.cloud".into());
+        let mut r = record();
+        r.manifest.relay = RelayMode::Standard;
+
+        let app = r.to_app(&u);
+        assert!(app.url.starts_with("http://"));
+        assert!(app.public_url.expect("published").starts_with("https://"));
+    }
+
+    #[test]
+    fn the_relay_mode_reaches_the_client_view() {
+        // The window has to render published and unpublished differently, so a
+        // mode that can be set but not read would show every published app as
+        // off - and offer to publish something already on the internet.
+        let mut r = record();
+        assert_eq!(r.to_app(&urls(None)).relay, RelayMode::Off);
+
+        r.manifest.relay = RelayMode::Standard;
+        assert_eq!(r.to_app(&urls(None)).relay, RelayMode::Standard);
+    }
+
+    #[test]
+    fn switching_the_relay_on_suggests_the_safer_mode_for_everything_but_public() {
+        // Public is already public, so it defaults to the mode that keeps the
+        // link alive. Everything else defaults to the one the edge cannot read.
+        assert_eq!(
+            RelayMode::suggested_for(Visibility::Public),
+            RelayMode::Standard
+        );
+        for v in [
+            Visibility::Private,
+            Visibility::Network,
+            Visibility::Invited,
+        ] {
+            assert_eq!(RelayMode::suggested_for(v), RelayMode::Strict);
+        }
     }
 
     #[test]

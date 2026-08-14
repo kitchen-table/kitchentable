@@ -54,7 +54,15 @@ impl Library {
             handle.map(|(h, d)| (h.trim().to_ascii_lowercase(), d.trim().to_ascii_lowercase()));
     }
 
-    /// The slug inside a public relay hostname, if it is one of ours.
+    /// This machine's handle and domain, for the window to render a suffix.
+    pub fn relay_identity(&self) -> Option<(String, String)> {
+        self.relay_identity
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The **public label** inside a relay hostname, if it is one of ours.
     ///
     /// `notes-adarsh.kitchentable.cloud` is `notes`, given the handle `adarsh`.
     /// Everything about this is a refusal to guess:
@@ -62,13 +70,17 @@ impl Library {
     /// - the domain has to match, or it is somebody else's name;
     /// - the handle has to be **this machine's**, so a request misrouted to us
     ///   is refused rather than served from whatever app happens to share a
-    ///   slug with somebody else's;
+    ///   label with somebody else's;
     /// - the split is at the last hyphen, which is unambiguous only because a
     ///   handle may not contain one.
     ///
+    /// Returns the label rather than a slug, because since public addresses
+    /// became editable the two are no longer the same string. Resolving the
+    /// label to an app is [`Self::slug_for_public_label`]'s job.
+    ///
     /// `kt-tunnel-proto` says a daemon receiving a hostname it does not serve
     /// should refuse rather than guess. This is that.
-    fn slug_in_relay_host(&self, hostname: &str) -> Option<String> {
+    fn label_in_relay_host(&self, hostname: &str) -> Option<String> {
         let identity = self
             .relay_identity
             .read()
@@ -81,8 +93,50 @@ impl Library {
             return None;
         }
 
-        let (slug, claimed) = label.rsplit_once('-')?;
-        (claimed == handle && !slug.is_empty()).then(|| slug.to_string())
+        let (label, claimed) = label.rsplit_once('-')?;
+        (claimed == handle && !label.is_empty()).then(|| label.to_string())
+    }
+
+    /// Which app answers to a public label, if any.
+    ///
+    /// A scan rather than an index: a library is tens of apps, and an index is
+    /// another thing that can disagree with the manifests it was built from.
+    /// The manifest is the only source of truth for a name somebody was sent.
+    pub fn slug_for_public_label(&self, label: &str) -> Option<String> {
+        let label = label.trim().to_ascii_lowercase();
+        self.read()
+            .values()
+            .find(|e| e.record.manifest.effective_public_label() == label)
+            .map(|e| e.record.manifest.slug.clone())
+    }
+
+    /// The public name this app answers to, if this install has a handle.
+    ///
+    /// The inverse of [`Self::label_in_relay_host`], and deliberately written as
+    /// its mirror: the two have to agree or a URL the window hands somebody is
+    /// one the daemon will refuse. `None` when no account has claimed a handle,
+    /// which is every install today.
+    ///
+    /// Says nothing about whether the app is published. That is `RelayMode`'s
+    /// question and it is asked in `to_app`, so that a name exists here for an
+    /// app whose owner has not switched the relay on - and is not shown.
+    pub fn public_host(&self, slug: &str) -> Option<String> {
+        let identity = self
+            .relay_identity
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let (handle, domain) = identity.as_ref()?;
+
+        // The label, not the slug: an app whose address the owner edited must
+        // be named by what they chose, or the window prints one URL and the
+        // daemon answers to another.
+        let label = self
+            .read()
+            .get(slug.trim())
+            .map(|e| e.record.manifest.effective_public_label().to_string())
+            .unwrap_or_else(|| slug.trim().to_ascii_lowercase());
+
+        (!label.is_empty()).then(|| format!("{label}-{handle}.{domain}"))
     }
 
     /// Replace the whole library.
@@ -229,7 +283,8 @@ impl AppSource for Library {
         // Or a public relay name, if this machine has one. The gate still
         // decides everything else, including whether this app was ever
         // published - see `RelayMode` and `decide`.
-        let slug = self.slug_in_relay_host(hostname)?;
+        let label = self.label_in_relay_host(hostname)?;
+        let slug = self.slug_for_public_label(&label)?;
         self.get(&slug)
     }
 
@@ -250,6 +305,7 @@ mod tests {
         AppRecord::unmeasured(
             AppManifest {
                 relay: Default::default(),
+                public_label: None,
                 name: name.into(),
                 slug: slug.into(),
                 icon: None,
@@ -390,6 +446,111 @@ mod tests {
         assert!(library
             .get_by_hostname("chores-rota-adarsh.kitchentable.cloud")
             .is_none());
+        // And it can name none either, so the window shows no public URL.
+        assert_eq!(library.public_host("chores-rota"), None);
+    }
+
+    #[test]
+    fn the_name_the_window_hands_out_is_the_one_the_daemon_answers_to() {
+        // The two halves are inverses and have to stay inverses. A URL built
+        // here that `slug_in_relay_host` would refuse is a link the owner sends
+        // somebody and that this very daemon then 404s.
+        let library = Library::new();
+        let tmp = std::env::temp_dir().display().to_string();
+        library.replace(vec![
+            record("chores-rota", "Chores rota", &tmp),
+            record("trip-briefing-html-template", "Trip briefing", &tmp),
+        ]);
+        library.set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        for slug in ["chores-rota", "trip-briefing-html-template"] {
+            let host = library.public_host(slug).expect("a handle is claimed");
+            assert_eq!(host, format!("{slug}-adarsh.kitchentable.cloud"));
+            assert_eq!(
+                library.get_by_hostname(&host).map(|a| a.slug),
+                Some(slug.to_string()),
+                "the daemon must answer to the name the window prints"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_address_resolves_and_the_old_one_stops() {
+        // Editing a public address is a rename of a promise. Both halves have
+        // to move together: the new name must reach the app, and the old one
+        // must stop - a stale name still answering is how somebody keeps
+        // handing out a link the owner thought they had retired.
+        let library = Library::new();
+        let tmp = std::env::temp_dir().display().to_string();
+        let mut record = record("trip-briefing-html-template", "Trip briefing", &tmp);
+        library.replace(vec![record.clone()]);
+        library.set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        let before = library
+            .public_host("trip-briefing-html-template")
+            .expect("named");
+        assert_eq!(
+            before,
+            "trip-briefing-html-template-adarsh.kitchentable.cloud"
+        );
+
+        record.manifest.public_label = Some("trip".into());
+        library.replace(vec![record]);
+
+        // The new name reaches it, and the local slug has not moved.
+        assert_eq!(
+            library
+                .public_host("trip-briefing-html-template")
+                .as_deref(),
+            Some("trip-adarsh.kitchentable.cloud")
+        );
+        assert_eq!(
+            library
+                .get_by_hostname("trip-adarsh.kitchentable.cloud")
+                .map(|a| a.slug),
+            Some("trip-briefing-html-template".to_string()),
+            "the daemon must answer to the name the owner chose"
+        );
+
+        // And the old one is gone.
+        assert!(
+            library.get_by_hostname(&before).is_none(),
+            "a retired address must stop answering"
+        );
+    }
+
+    #[test]
+    fn renaming_a_public_address_leaves_the_local_one_alone() {
+        // The two names are separate on purpose. Someone on the sofa uses the
+        // `.local` one and should not notice that the internet-facing name of
+        // the same app changed this morning.
+        let announcer = kt_mdns::MockAnnouncer::new();
+        let library = Library::new();
+        let mut record = record(
+            "chores-rota",
+            "Chores rota",
+            &std::env::temp_dir().display().to_string(),
+        );
+        record.manifest.public_label = Some("jobs".into());
+        library.replace_announcing(
+            vec![record],
+            Some(&announcer),
+            Some(std::net::Ipv4Addr::LOCALHOST),
+        );
+        library.set_relay_identity(Some(("adarsh".into(), "kitchentable.cloud".into())));
+
+        assert_eq!(
+            library.public_host("chores-rota").as_deref(),
+            Some("jobs-adarsh.kitchentable.cloud")
+        );
+        assert_eq!(
+            library
+                .get_by_hostname("chores-rota.local")
+                .map(|a| a.slug)
+                .as_deref(),
+            Some("chores-rota"),
+            "the LAN name follows the slug and is untouched"
+        );
     }
 
     #[test]

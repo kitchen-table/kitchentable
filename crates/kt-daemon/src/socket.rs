@@ -227,6 +227,7 @@ mod tests {
                 port_suffix: ":8420".into(),
                 prefix_origin: "http://localhost:8420".into(),
                 fallback_origin: "http://127.0.0.1:8420".into(),
+                public_host: None,
             },
             serving: ServingState::Serving,
             started: Instant::now(),
@@ -234,6 +235,7 @@ mod tests {
             events: crate::rpc::Events::new(),
             presence: std::sync::Arc::new(kt_server::Presence::new()),
             install_key: None,
+            relay: Arc::new(crate::relay::RelayStatus::new()),
             rescan: std::sync::Arc::new(|| {}),
         })
     }
