@@ -259,6 +259,23 @@ async fn run() -> Result<(), StartupError> {
         "kitchen table is serving"
     );
 
+    // Choose a cryptography provider before anything can open a TLS connection.
+    //
+    // rustls 0.23 will not guess when zero or two are compiled in; it returns
+    // an error at the first handshake instead. Nothing here caught that,
+    // because the relay's tests use a stub edge on plain `ws://` - deliberately,
+    // so that a test does not have to stand up a certificate authority - so the
+    // first real `wss://` dial was the first TLS this code had ever done.
+    //
+    // Installed rather than left to feature detection so the choice is visible
+    // in one place and cannot be changed by a dependency enabling the other.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a cryptography provider was already installed");
+    }
+
     // Which public names this machine answers to. A placeholder for the handle
     // claim that arrives with account linking, in the same spirit as
     // KT_RELAY_URL - and, like it, absent on every install today. Without one

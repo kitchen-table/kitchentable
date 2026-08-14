@@ -25,6 +25,14 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+# Named directly, only to choose a cryptography provider.
+#
+# tokio-tungstenite pulls rustls in without selecting one, and rustls 0.23
+# refuses to guess at runtime when zero or two are compiled in - it returns an
+# error the first time anything opens a TLS connection. Which is the first time
+# a daemon dials a real `wss://` edge, in front of a user, after every test has
+# passed. See the note in main.rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tower = { version = "0.5", features = ["util"] }
 yamux = "0.14.0"
 tracing.workspace = true
