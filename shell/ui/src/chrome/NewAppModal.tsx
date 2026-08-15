@@ -60,20 +60,20 @@ export function NewAppModal({
         Any folder becomes an app automatically. No config required to start.
       </ModalHeading>
 
-      <button
-        type="button"
-        onClick={pick}
-        disabled={working}
+      {/* A drop target rather than a button. It used to be one, and clicking
+          it opened a folder-only picker - so the obvious thing to press
+          silently refused half of what the dialog offered to host. The two
+          ways in are now spelled out below it, as equals. */}
+      <div
         style={{
           display: "block",
           width: "100%",
           border: `2px dashed ${dropping ? "var(--accent)" : "var(--dash)"}`,
           background: dropping ? "var(--accent-tint)" : "transparent",
           borderRadius: 14,
-          padding: 34,
+          padding: "28px 34px 24px",
           textAlign: "center",
           marginBottom: 16,
-          cursor: working ? "wait" : "pointer",
           transition: "border-color .15s, background .15s",
         }}
       >
@@ -107,13 +107,23 @@ export function NewAppModal({
         <span
           style={{ display: "block", font: "400 12px var(--font-mono)", color: "var(--muted)" }}
         >
-          or click to choose a folder
+          a folder, or a single page, PDF or image
         </span>
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 14 }}>
+          <ChooseButton onClick={pick} disabled={working}>
+            Choose a folder
+          </ChooseButton>
+          <ChooseButton onClick={pickFile} disabled={working}>
+            Choose a file
+          </ChooseButton>
+        </div>
+
         {workspace && (
           <span
             style={{
               display: "block",
-              marginTop: 10,
+              marginTop: 12,
               font: "400 11px var(--font-mono)",
               color: "var(--faint)",
               wordBreak: "break-all",
@@ -122,31 +132,7 @@ export function NewAppModal({
             copied into {workspace}
           </span>
         )}
-      </button>
-
-      {/* The dialog used to list "HTML, CSS, JS, PDFs, images" under a picker
-          that would only accept a directory, so the single file somebody most
-          wants to hand round - a menu, a rota, a saved page - was the one thing
-          it could not take. A second button rather than a cleverer first one:
-          the platform dialog is a folder picker or a file picker, never both. */}
-      <button
-        type="button"
-        onClick={pickFile}
-        disabled={working}
-        style={{
-          display: "block",
-          width: "100%",
-          border: "none",
-          background: "none",
-          padding: "0 0 16px",
-          textAlign: "center",
-          font: "500 12px var(--font-sans)",
-          color: "var(--accent)",
-          cursor: working ? "wait" : "pointer",
-        }}
-      >
-        Or choose a single file — a PDF, an image, one page
-      </button>
+      </div>
 
       <label style={{ display: "block", marginBottom: 16 }}>
         <span
@@ -239,6 +225,44 @@ export function NewAppModal({
  * message is already written for a person - "Trip Planner is already in your
  * workspace" - so it is shown as-is.
  */
+/**
+ * One of the two ways in, drawn the same as the other.
+ *
+ * Two buttons rather than a cleverer single one: the platform dialog is a
+ * folder picker or a file picker - `directory` is a boolean, and macOS cannot
+ * be asked for either through this plugin. Equal weight because neither is the
+ * unusual case: a folder is a site, a file is a menu.
+ */
+function ChooseButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        border: "1px solid var(--border2)",
+        borderRadius: 9,
+        padding: "8px 14px",
+        background: "var(--paper)",
+        color: "var(--ink2)",
+        font: "600 12.5px var(--font-sans)",
+        cursor: disabled ? "wait" : "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function message(raw: unknown): string {
   if (typeof raw === "object" && raw !== null && "message" in raw) {
     return String((raw as { message: unknown }).message);

@@ -27,7 +27,7 @@ describe("NewAppModal", () => {
     // hand round was the one thing it could not take.
     const { onPickFile, onPick, onClose } = show();
 
-    fireEvent.click(screen.getByRole("button", { name: /choose a single file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
 
     await waitFor(() => expect(onPickFile).toHaveBeenCalled());
     expect(onPick).not.toHaveBeenCalled();
@@ -37,6 +37,11 @@ describe("NewAppModal", () => {
   it("says a file may be dropped, not only a folder", () => {
     show();
     expect(screen.getByText("Drop a folder or a file here")).toBeDefined();
+    // And both ways in are offered at the same weight. The drop zone used to
+    // be the button, and it opened a folder-only picker - so the obvious thing
+    // to press silently refused half of what this dialog offers to host.
+    expect(screen.getByRole("button", { name: "Choose a folder" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Choose a file" })).toBeDefined();
   });
 
   it("stays open when the file picker is cancelled", async () => {
@@ -45,7 +50,7 @@ describe("NewAppModal", () => {
     const onPickFile = vi.fn().mockResolvedValue(null);
     const { onClose } = show({ onPickFile });
 
-    fireEvent.click(screen.getByRole("button", { name: /choose a single file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
 
     await waitFor(() => expect(onPickFile).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
@@ -57,7 +62,7 @@ describe("NewAppModal", () => {
     });
     show({ onPickFile });
 
-    fireEvent.click(screen.getByRole("button", { name: /choose a single file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
 
     await waitFor(() =>
       expect(screen.getByText(/already in your workspace/)).toBeDefined(),
@@ -107,7 +112,7 @@ describe("NewAppModal", () => {
   it("opens the folder picker from the drop zone", async () => {
     const { onPick, onClose } = show();
 
-    fireEvent.click(screen.getByRole("button", { name: /Drop a folder or a file here/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder" }));
 
     await waitFor(() => expect(onPick).toHaveBeenCalled());
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -118,7 +123,7 @@ describe("NewAppModal", () => {
     const onPick = vi.fn().mockResolvedValue(null);
     const { onClose } = show({ onPick });
 
-    fireEvent.click(screen.getByRole("button", { name: /Drop a folder or a file here/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder" }));
 
     await waitFor(() => expect(onPick).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
