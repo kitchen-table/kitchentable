@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { App } from "../generated";
 import { Qr } from "../Qr";
 import { type InviteView, Sharing } from "../Sharing";
 import { type AccessEvent, ago, describe, sentence, size } from "../activity";
 import { call, useStatus } from "../daemon";
+import { openInstead } from "../external";
 import { handover } from "../relay";
 import { useDevices } from "../devices";
 import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
@@ -36,6 +38,10 @@ export function AppDetail({
   // is its public one: it is the name the owner chose, the name they sent
   // people, and the first place they look to check it took.
   const hand = handover(app, useStatus(true).data?.relay);
+
+  // Opening failing silently is the bug this button just had. If the OS will
+  // not take the URL, say so and show the address, so it can be pasted.
+  const [openError, setOpenError] = useState<string | null>(null);
 
   return (
     <div
@@ -137,6 +143,10 @@ export function AppDetail({
               title={`Open ${app.loopback_url} on this machine`}
               target="_blank"
               rel="noreferrer"
+              // A webview has no second tab to open into, so `_blank` alone is
+              // swallowed and this button did nothing in the one place it is
+              // most likely to be pressed. See `external.ts`.
+              onClick={openInstead(app.loopback_url, (error) => setOpenError(message(error)))}
               style={{
                 padding: "9px 15px",
                 borderRadius: 9,
@@ -164,6 +174,20 @@ export function AppDetail({
             </button>
           </div>
         </div>
+
+        {openError && (
+          <p
+            role="alert"
+            style={{
+              margin: "10px 0 0",
+              font: "400 12px var(--font-sans)",
+              color: "var(--danger)",
+            }}
+          >
+            Could not open a browser — {openError}. The address is{" "}
+            <code style={{ fontFamily: "var(--font-mono)" }}>{app.loopback_url}</code>.
+          </p>
+        )}
 
         <div role="tablist" style={{ display: "flex", gap: 24, marginTop: 20 }}>
           {APP_TABS.map((value) => {
@@ -652,6 +676,13 @@ export function Row({
       </span>
     </div>
   );
+}
+
+function message(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
 }
 
 export function Empty({ children }: { children: React.ReactNode }) {
