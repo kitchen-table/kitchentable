@@ -10,9 +10,11 @@ use std::sync::Mutex;
 use kt_types::{AppManifest, AppRecord, RelayMode, Visibility};
 use rusqlite::{params, Connection, OptionalExtension};
 
+mod app_store;
 mod migrations;
 mod trust;
 
+pub use app_store::{AppStore, Entry, Scope, Storage, DEFAULT_QUOTA_BYTES};
 pub use trust::AccessEvent;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +35,12 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("this app has used its {limit} bytes of storage")]
+    Quota { limit: i64 },
+    /// A slug that would not be a filename. The storage API resolves an app
+    /// from the `Host` header, so this is reachable from outside.
+    #[error("{0:?} is not a slug this daemon would have minted")]
+    BadSlug(String),
 }
 
 pub struct Store {
