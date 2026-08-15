@@ -28,7 +28,15 @@ pub struct RequestContext {
     pub session: Option<SessionToken>,
     /// Whether the request arrived from a network the owner marked as home.
     pub on_household_network: bool,
-    /// Whether this request came from the owner's own machine (loopback).
+    /// Whether this request originated on the owner's own machine.
+    ///
+    /// Loopback is the obvious case and was for a while the only one, which
+    /// made the owner a stranger to their own app the moment they reached it by
+    /// its `.local` name: that resolves to this machine's *LAN* address, so a
+    /// browser two inches away was refused a Private app. The test is now "did
+    /// this start here", which `Peer::context` answers with loopback **or** an
+    /// address this machine currently holds. The name is kept because renaming
+    /// a field the whole matrix turns on is a change worth making on its own.
     pub is_loopback: bool,
     /// Whether this request arrived over the relay - that is, from the
     /// internet, by way of a server in a datacentre.

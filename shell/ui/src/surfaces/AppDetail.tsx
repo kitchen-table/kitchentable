@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { App } from "../generated";
 import { Qr } from "../Qr";
 import { type InviteView, Sharing } from "../Sharing";
 import { type AccessEvent, ago, describe, sentence, size } from "../activity";
 import { call, useStatus } from "../daemon";
+import { openInstead } from "../external";
 import { handover } from "../relay";
 import { useDevices } from "../devices";
 import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
@@ -37,6 +39,13 @@ export function AppDetail({
   // is its public one: it is the name the owner chose, the name they sent
   // people, and the first place they look to check it took.
   const hand = handover(app, useStatus(true).data?.relay);
+  // Where Open goes: the address on screen, whatever it is. No substitution,
+  // on any visibility level.
+  const target = hand.url;
+
+  // Opening failing silently is the bug this button just had. If the OS will
+  // not take the URL, say so and show the address, so it can be pasted.
+  const [openError, setOpenError] = useState<string | null>(null);
 
   return (
     <div
@@ -128,16 +137,19 @@ export function AppDetail({
 
           <div style={{ display: "flex", gap: 10, flex: "none" }}>
             <a
-              // Loopback, not the announced `.local` name and not the address
-              // URL. Both of those resolve to this machine's *LAN* address, so
-              // neither earns the own-machine exemption in the gate: clicking
-              // this on a Private app was answered 403, and on an Invited one
-              // it asked the owner to pair with their own machine. Loopback is
-              // the one address that always opens for the person sitting here.
-              href={app.loopback_url}
-              title={`Open ${app.loopback_url} on this machine`}
+              // The address printed two lines above, so pressing Open lands
+              // where the app says it lives - on every visibility level. A
+              // Private app is satisfiable only on loopback and so answers 403
+              // here; that is the gate's answer to show, not one to route
+              // around by opening a different URL than the one on screen.
+              href={target}
+              title={`Open ${target}`}
               target="_blank"
               rel="noreferrer"
+              // A webview has no second tab to open into, so `_blank` alone is
+              // swallowed and this button did nothing in the one place it is
+              // most likely to be pressed. See `external.ts`.
+              onClick={openInstead(target, (error) => setOpenError(message(error)))}
               style={{
                 padding: "9px 15px",
                 borderRadius: 9,
@@ -165,6 +177,20 @@ export function AppDetail({
             </button>
           </div>
         </div>
+
+        {openError && (
+          <p
+            role="alert"
+            style={{
+              margin: "10px 0 0",
+              font: "400 12px var(--font-sans)",
+              color: "var(--danger)",
+            }}
+          >
+            Could not open a browser — {openError}. The address is{" "}
+            <code style={{ fontFamily: "var(--font-mono)" }}>{target}</code>.
+          </p>
+        )}
 
         <div role="tablist" style={{ display: "flex", gap: 24, marginTop: 20 }}>
           {APP_TABS.map((value) => {
@@ -654,6 +680,13 @@ export function Row({
       </span>
     </div>
   );
+}
+
+function message(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
 }
 
 export function Empty({ children }: { children: React.ReactNode }) {

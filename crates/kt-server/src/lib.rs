@@ -71,6 +71,19 @@ pub trait TrustSource: Send + Sync + 'static {
     /// Whether this machine is currently on a network the owner marked as home.
     fn on_household_network(&self) -> bool;
 
+    /// The address this machine currently answers on, if it has one.
+    ///
+    /// Used for one thing: recognising the owner's own browser when it arrives
+    /// by the `.local` name rather than by `localhost`. Asked per request
+    /// rather than cached, because a remembered address goes stale when DHCP
+    /// moves and could later belong to someone else's laptop.
+    ///
+    /// Defaults to `None`, which is the pre-existing behaviour - loopback only.
+    /// A trust source that does not know where it lives grants nothing extra.
+    fn own_address(&self) -> Option<std::net::IpAddr> {
+        None
+    }
+
     /// Redeem an invite for the device behind this request.
     ///
     /// Takes the headers rather than just a user agent so an existing session
@@ -185,7 +198,9 @@ impl Peer {
             on_household_network: !self.relayed && trust.on_household_network(),
             // The owner's own browser must never have to pair with itself -
             // and nothing arriving over the tunnel is the owner's own browser.
-            is_loopback: !self.relayed && gate::is_loopback(self.address),
+            // "Own browser" means loopback *or* this machine's own address,
+            // because `.local` resolves to the latter. See `gate::is_loopback`.
+            is_loopback: !self.relayed && gate::is_loopback(self.address, trust.own_address()),
             // The one field that is true *because* the request was relayed
             // rather than false because of it. It costs an unpublished app
             // nothing locally and refuses it everywhere else.
@@ -328,7 +343,7 @@ async fn beat<S: AppSource, T: TrustSource>(
         return StatusCode::NO_CONTENT.into_response();
     }
 
-    let who = viewer_id(device.as_ref(), peer.address);
+    let who = viewer_id(device.as_ref(), peer.address, state.trust.own_address());
 
     let path = if beat.path.is_empty() {
         "/".to_string()
@@ -351,7 +366,11 @@ async fn gone<S: AppSource, T: TrustSource>(
     headers: axum::http::HeaderMap,
     peer: Peer,
 ) -> Response {
-    let who = viewer_id(state.trust.device_for(&headers).as_ref(), peer.address);
+    let who = viewer_id(
+        state.trust.device_for(&headers).as_ref(),
+        peer.address,
+        state.trust.own_address(),
+    );
 
     if state.presence.left(&beat.app, &who) {
         state
@@ -376,12 +395,16 @@ pub const OWNER: &str = "owner";
 /// of it, the gate has already decided by the time we get here, and an address
 /// is something the device asserts. It only decides which row of a list someone
 /// appears on.
-fn viewer_id(device: Option<&kt_auth::Device>, peer: Option<std::net::IpAddr>) -> String {
+fn viewer_id(
+    device: Option<&kt_auth::Device>,
+    peer: Option<std::net::IpAddr>,
+    own: Option<std::net::IpAddr>,
+) -> String {
     if let Some(device) = device {
         return device.id.as_str().to_string();
     }
     match peer {
-        Some(addr) if !gate::is_loopback(Some(addr)) => format!("at:{addr}"),
+        Some(addr) if !gate::is_loopback(Some(addr), own) => format!("at:{addr}"),
         // The owner's own browser, which never had to pair with itself.
         _ => OWNER.to_string(),
     }
@@ -687,7 +710,13 @@ mod tests {
 
     /// A trust source that says yes to the household question, which is what
     /// the daemon on a real home network says.
+    ///
+    /// It also answers with an address, because a real daemon has one and the
+    /// owner's exemption now turns on it. `192.168.0.10` is this machine
+    /// throughout these tests; anything else on `192.168.0.x` is a neighbour.
     struct AtHome;
+
+    const THIS_MACHINE: &str = "192.168.0.10";
 
     impl TrustSource for AtHome {
         fn device_for(&self, _: &axum::http::HeaderMap) -> Option<kt_auth::Device> {
@@ -695,6 +724,9 @@ mod tests {
         }
         fn on_household_network(&self) -> bool {
             true
+        }
+        fn own_address(&self) -> Option<std::net::IpAddr> {
+            Some(THIS_MACHINE.parse().expect("an address"))
         }
         fn redeem(&self, _: &axum::http::HeaderMap, _: &str) -> Result<Redemption, String> {
             Err("not in this test".into())
@@ -726,6 +758,103 @@ mod tests {
             address: Some(address.parse().expect("an address")),
             relayed: true,
         }
+    }
+
+    #[test]
+    fn the_owner_reaching_their_own_machine_by_its_lan_address_is_still_the_owner() {
+        // Found by an owner clicking Open on their own Private app and being
+        // told "Not available" on their own Mac. `localhost` counted and
+        // `chores-rota.local` did not, because Bonjour resolves that to this
+        // machine's LAN address - the same browser, two inches away, refused.
+        let ctx = lan(THIS_MACHINE).context(&AtHome);
+        assert!(
+            ctx.is_loopback,
+            "this machine's own address is this machine"
+        );
+
+        assert!(
+            matches!(
+                kt_auth::decide(
+                    kt_types::Visibility::Private,
+                    false,
+                    kt_types::RelayMode::Off,
+                    None,
+                    &ctx
+                ),
+                kt_auth::Decision::Allow
+            ),
+            "a Private app must open for the machine it lives on"
+        );
+    }
+
+    #[test]
+    fn a_neighbour_on_the_same_network_is_not_this_machine() {
+        // The whole risk of the rule above. One address is the exemption; every
+        // other address on the same subnet is a stranger, and a Private app is
+        // the owner's own thing.
+        let ctx = lan("192.168.0.11").context(&AtHome);
+        assert!(!ctx.is_loopback, "a neighbour is not this machine");
+
+        assert!(
+            matches!(
+                kt_auth::decide(
+                    kt_types::Visibility::Private,
+                    false,
+                    kt_types::RelayMode::Off,
+                    None,
+                    &ctx
+                ),
+                kt_auth::Decision::Deny(_)
+            ),
+            "a Private app must not open for the rest of the house"
+        );
+    }
+
+    #[test]
+    fn a_relayed_request_claiming_this_machines_address_gets_nothing() {
+        // The edge reports whatever address it saw, and a viewer behind their
+        // own router legitimately has a 192.168 one - so this is a shape that
+        // arrives in the real world rather than only from an attacker. It is
+        // refused by construction: `relayed` short-circuits before the address
+        // is compared at all.
+        let ctx = relayed(THIS_MACHINE).context(&AtHome);
+        assert!(!ctx.is_loopback);
+        assert!(!ctx.on_household_network);
+        assert!(ctx.arrived_by_relay);
+    }
+
+    #[test]
+    fn a_trust_source_that_does_not_know_its_address_grants_only_loopback() {
+        // The trait's default. A daemon that cannot answer must not be a daemon
+        // that hands the exemption to whoever asks.
+        struct Nowhere;
+        impl TrustSource for Nowhere {
+            fn device_for(&self, _: &axum::http::HeaderMap) -> Option<kt_auth::Device> {
+                None
+            }
+            fn on_household_network(&self) -> bool {
+                false
+            }
+            fn redeem(&self, _: &axum::http::HeaderMap, _: &str) -> Result<Redemption, String> {
+                Err("not in this test".into())
+            }
+            fn request_access(
+                &self,
+                _: &axum::http::HeaderMap,
+                slug: &str,
+                _: Option<std::net::IpAddr>,
+            ) -> Redemption {
+                Redemption {
+                    cookie: None,
+                    app_slug: slug.to_string(),
+                    pending: true,
+                }
+            }
+            fn log(&self, _: &str, _: Option<&kt_auth::DeviceId>, _: &str) {}
+        }
+
+        assert!(!lan(THIS_MACHINE).context(&Nowhere).is_loopback);
+        assert!(lan("127.0.0.1").context(&Nowhere).is_loopback);
     }
 
     #[test]
