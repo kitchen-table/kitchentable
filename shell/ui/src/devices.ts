@@ -58,6 +58,68 @@ export function revoked(devices: Device[] = []): Device[] {
   return devices.filter((device) => device.status === "revoked");
 }
 
+/**
+ * Several rows that are almost certainly the same physical device.
+ *
+ * `sessions` is every row, newest first; `head` is the one the group is drawn
+ * as. The group has no id of its own because it is not a thing the daemon knows
+ * about - see [`group`].
+ */
+export interface DeviceGroup {
+  /** The row the group is named and dated by: the most recently seen. */
+  head: Device;
+  sessions: Device[];
+}
+
+/**
+ * Group rows that share a name and a browser.
+ *
+ * **For reading and for revoking. Never for granting.** A device id is minted
+ * fresh whenever a request arrives without a usable cookie, so one phone that
+ * has cleared its cookies a few times is several rows, and the list becomes
+ * archaeology - which is what makes it useless for the one job it has, letting
+ * an owner recognise what is in their house.
+ *
+ * What is matched on is a name and a user agent, and both are guessable and
+ * forgeable. So this must never be the reason anybody is let *in*: approving
+ * stays per-row, in the pairing prompt, where the owner is answering a specific
+ * device that is asking right now. Revoking and forgetting apply to the whole
+ * group, because doing less than the owner asked is the failure that matters
+ * there - revoking one row of nine left the other eight approved.
+ *
+ * The owner's own machine is never grouped with anything. It is one row by
+ * definition and merging it into a pile would put "This machine" on a group
+ * that also contains strangers.
+ */
+export function group(devices: Device[] = []): DeviceGroup[] {
+  const groups = new Map<string, Device[]>();
+  for (const device of devices) {
+    // A separator that cannot occur in either half. A space would merge a
+    // device called "iPhone Safari" with one called "iPhone" on Safari, and
+    // owners name their devices in whatever words they like.
+    const key =
+      device.status === "owner"
+        ? `owner:${device.id}`
+        : `${device.name}\u0000${device.user_agent}`;
+    const existing = groups.get(key);
+    if (existing) existing.push(device);
+    else groups.set(key, [device]);
+  }
+
+  return [...groups.values()]
+    .map((sessions) => {
+      const ordered = [...sessions].sort((a, b) => b.last_seen - a.last_seen);
+      return { head: ordered[0] as Device, sessions: ordered };
+    })
+    .sort((a, b) => b.head.last_seen - a.head.last_seen);
+}
+
+/** How many rows in a group, said the way the list shows it. */
+export function sessionCount(group: DeviceGroup): string | null {
+  const n = group.sessions.length;
+  return n > 1 ? `${n} sessions` : null;
+}
+
 export function useDeviceActions() {
   const queryClient = useQueryClient();
   const settle = () => {
@@ -88,7 +150,29 @@ export function useDeviceActions() {
     onSuccess: settle,
   });
 
-  return { approve, deny, revoke, rename };
+  /**
+   * Remove rows from the list, one call each.
+   *
+   * Sequential rather than concurrent: the daemon holds one connection and
+   * answers in order anyway, and a partial failure is easier to reason about
+   * when the calls that already went through are the ones at the front.
+   */
+  const forget = useMutation({
+    mutationFn: async (ids: string[]) => {
+      for (const id of ids) await call("device.forget", { id });
+    },
+    onSuccess: settle,
+  });
+
+  /** Revoke every session in a group. Revoking one of nine left eight in. */
+  const revokeAll = useMutation({
+    mutationFn: async (ids: string[]) => {
+      for (const id of ids) await call("device.revoke", { id });
+    },
+    onSuccess: settle,
+  });
+
+  return { approve, deny, revoke, revokeAll, rename, forget };
 }
 
 /**

@@ -147,6 +147,127 @@ describe("Devices", () => {
     expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
   });
 
+  it("shows one row for a phone that has lost its cookie three times", async () => {
+    // The bug this fixes: thirty-six rows for four physical devices, because a
+    // device id is minted fresh whenever a request arrives without a usable
+    // cookie. The list is the security surface of the product and it was
+    // mostly archaeology.
+    withDevices([
+      device({ id: "a", status: "approved", name: "iPhone", last_seen: 300 }),
+      device({ id: "b", status: "approved", name: "iPhone", last_seen: 200 }),
+      device({ id: "c", status: "approved", name: "iPhone", last_seen: 100 }),
+    ]);
+    show();
+
+    await waitFor(() =>
+      expect(screen.getByText("Approved devices · 1 (3 sessions)")).toBeDefined(),
+    );
+    expect(screen.getAllByRole("button", { name: "iPhone" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /3 sessions/ })).toBeDefined();
+  });
+
+  it("keeps two different devices apart even when both are iPhones", async () => {
+    withDevices([
+      device({ id: "a", status: "approved", name: "Priya's iPhone" }),
+      device({ id: "b", status: "approved", name: "Sam's iPhone" }),
+    ]);
+    show();
+
+    await waitFor(() => expect(screen.getByText("Approved devices · 2")).toBeDefined());
+  });
+
+  it("never folds this machine into a group with anything else", async () => {
+    // "This machine" on a row that also stands for two strangers would be a
+    // straightforward lie about who is trusted.
+    withDevices([
+      device({ id: "owner", status: "owner", name: "Mac", user_agent: "Safari" }),
+      device({ id: "other", status: "approved", name: "Mac", user_agent: "Safari" }),
+    ]);
+    show();
+
+    await waitFor(() => expect(screen.getByText("This machine")).toBeDefined());
+    expect(screen.getByText("Approved devices · 2")).toBeDefined();
+  });
+
+  it("revokes every session in a group, not just the newest", async () => {
+    // Revoking one row of three left the other two approved, so the most
+    // consequential control in this tab did less than it said.
+    withDevices([
+      device({ id: "a", status: "approved", name: "iPhone", last_seen: 300 }),
+      device({ id: "b", status: "approved", name: "iPhone", last_seen: 200 }),
+    ]);
+    show();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /2 sessions/ })).toBeDefined(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+
+    await waitFor(() => {
+      const revocations = call.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "kt_call" && (args as { method?: string })?.method === "device.revoke",
+      );
+      expect(revocations).toHaveLength(2);
+    });
+  });
+
+  it("asks before removing a row, and says what removing means", async () => {
+    withDevices([device({ status: "approved", name: "Old iPad" })]);
+    show();
+
+    await waitFor(() => expect(screen.getByText("Approved devices · 1")).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(screen.getByText(/it will ask to be let in, as a new device/)).toBeDefined();
+    expect(paramsOf("device.forget")).toBeUndefined();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Remove" }).at(-1)!);
+    await waitFor(() => expect(paramsOf("device.forget")).toBeDefined());
+    expect(paramsOf("device.forget")?.params).toEqual({ id: "dev-1" });
+  });
+
+  it("warns that removing a refused device drops the refusal", async () => {
+    // Removing a revoked row is a step backwards - the refusal becomes another
+    // prompt - so an owner tidying the list must not do it believing the
+    // refusal still holds.
+    withDevices([device({ status: "revoked", name: "Unknown iPad" })]);
+    show();
+
+    await waitFor(() => expect(screen.getByText("Refused · 1")).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(screen.getByText(/removing the row drops that refusal/)).toBeDefined();
+  });
+
+  it("will not offer to remove this machine", async () => {
+    withDevices([device({ status: "owner", name: "This Mac" })]);
+    show();
+
+    await waitFor(() => expect(screen.getByText("This machine")).toBeDefined());
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+
+  it("lists the sessions behind a group so one can be removed on its own", async () => {
+    withDevices([
+      device({ id: "a", status: "approved", name: "iPhone", fingerprint: "aa:11:22", last_seen: 300 }),
+      device({ id: "b", status: "approved", name: "iPhone", fingerprint: "bb:33:44", last_seen: 200 }),
+    ]);
+    show();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /2 sessions/ })).toBeDefined(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2 sessions/ }));
+
+    expect(screen.getByText(/bb:33:44/)).toBeDefined();
+    const removals = screen.getAllByRole("button", { name: "Remove" });
+    fireEvent.click(removals.at(-1)!);
+
+    await waitFor(() => expect(paramsOf("device.forget")).toBeDefined());
+    expect(paramsOf("device.forget")?.params).toEqual({ id: "b" });
+  });
+
   it("keeps refused devices visible rather than forgetting them", async () => {
     withDevices([device({ status: "revoked", name: "Unknown iPad" })]);
     show();

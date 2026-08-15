@@ -92,6 +92,37 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Remove a device from the list entirely.
+    ///
+    /// The list is the security surface of this product, and until now it only
+    /// ever grew: every lost cookie, private window and rotated session key
+    /// left a row behind, so an owner reading it cannot tell which `iPhone` is
+    /// their daughter's and which is a ghost from March. Approve, deny, revoke
+    /// and rename all edit a row; nothing removed one.
+    ///
+    /// **This is a way to tidy the list, not a way to lock a device out.** A
+    /// removed row's cookie no longer names anything, so that browser comes
+    /// back as a fresh pending device and has to ask again. For a stale row
+    /// that is exactly right. For a revoked one it is a step *backwards* -
+    /// refusal becomes another prompt - so the window says so before doing it.
+    /// The real fix is an identity that survives a lost cookie; this is not it.
+    ///
+    /// An invite pinned to this device is unpinned rather than deleted. The
+    /// link was a promise to a person and the pin was a detail of how it was
+    /// kept; dropping the invite would revoke a link the owner never touched,
+    /// and leaving the pin would break the foreign key.
+    pub fn forget_device(&self, id: &DeviceId) -> Result<bool, StoreError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE invites SET pinned_device = NULL WHERE pinned_device = ?1",
+            params![id.as_str()],
+        )?;
+        let n = tx.execute("DELETE FROM devices WHERE id = ?1", params![id.as_str()])?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     /// The network answering with the name a device publishes for itself.
     ///
     /// Only replaces a guess. The lookup is slow and lands whenever it lands,
@@ -352,6 +383,55 @@ mod tests {
         assert!(store
             .record_redemption(&invite.token, Some(&ghost))
             .is_err());
+    }
+
+    #[test]
+    fn forgetting_a_device_removes_it_from_the_list() {
+        let store = Store::in_memory().expect("opens");
+        let d = device();
+        store.upsert_device(&d).expect("inserts");
+
+        assert!(store.forget_device(&d.id).expect("forgets"));
+        assert_eq!(store.get_device(&d.id).expect("reads"), None);
+        assert!(store.list_devices().expect("lists").is_empty());
+    }
+
+    #[test]
+    fn forgetting_a_device_twice_is_not_an_error_the_second_time() {
+        // The window can have two paths to the same button - a group's Remove
+        // and the same row's own Remove - and the second should report that
+        // there was nothing there, not fail the call.
+        let store = Store::in_memory().expect("opens");
+        let d = device();
+        store.upsert_device(&d).expect("inserts");
+
+        assert!(store.forget_device(&d.id).expect("forgets"));
+        assert!(!store.forget_device(&d.id).expect("asks again"));
+    }
+
+    #[test]
+    fn forgetting_a_pinned_device_unpins_the_invite_rather_than_failing() {
+        // `invites.pinned_device` is a foreign key, so a plain DELETE would be
+        // refused and the row would be unremovable. Dropping the invite instead
+        // would revoke a link the owner never touched.
+        let store = Store::in_memory().expect("opens");
+        let d = device();
+        store.upsert_device(&d).expect("inserts");
+
+        let invite = Invite::new("trip", "For Priya", InvitePolicy::default(), NOW);
+        store.create_invite(&invite).expect("creates");
+        store
+            .record_redemption(&invite.token, Some(&d.id))
+            .expect("pins");
+
+        assert!(store.forget_device(&d.id).expect("forgets"));
+
+        let after = store
+            .get_invite(&invite.token)
+            .expect("reads")
+            .expect("still there");
+        assert_eq!(after.pinned_device, None);
+        assert!(after.revoked_at.is_none());
     }
 
     #[test]

@@ -80,6 +80,16 @@ export const ACTION: Record<
     title: "Access revoked",
     phrase: "had access revoked",
   },
+  // The owner tidying the list rather than refusing anybody. Worth its own
+  // wording: "removed from the list" is what happened, and reading it as a
+  // revocation would be wrong - a forgotten device may ask again.
+  forgotten: {
+    glyph: "−",
+    colour: "var(--muted)",
+    tint: "var(--chip)",
+    title: "Removed from the list",
+    phrase: "was removed from the device list",
+  },
   // Nothing writes this yet; it arrives with versioning in D6. Kept because
   // the glyph and wording are settled, and an entry costs nothing until then.
   deployed: {
@@ -132,9 +142,67 @@ export function sentence(event: AccessEvent, deviceName?: string): string {
   return `${who(event, deviceName)} ${describe(event.action).phrase}`;
 }
 
+/**
+ * What to call whoever caused an event, in the mono sub-line.
+ *
+ * Lower case and terse, because it sits at the head of a row of fragments
+ * rather than starting a sentence - the sentence is the line above it.
+ */
+const ACTOR: Record<string, string> = {
+  owner: "you",
+  viewer: "device",
+  agent: "agent",
+  cli: "cli",
+  system: "kitchen table",
+};
+
+/**
+ * The mono sub-line under an activity row: who, which device, and any detail.
+ *
+ * The device's fingerprint rather than its id, because the fingerprint is what
+ * the Devices tab and the pairing prompt both show - somebody comparing a row
+ * here against a row there needs the same string in both places. The id is
+ * neither short nor meaningful to a person.
+ *
+ * Takes the device's bits already looked up rather than a `Device`, so this
+ * module stays free of the query layer and can be tested on plain values.
+ */
+export function meta(
+  event: AccessEvent,
+  device?: { fingerprint?: string; agent?: string },
+): string {
+  const parts = [ACTOR[event.actor] ?? event.actor];
+  if (device?.fingerprint) parts.push(device.fingerprint);
+  if (device?.agent) parts.push(device.agent);
+  if (event.detail) parts.push(event.detail);
+  return parts.join(" · ");
+}
+
 /** The activity filters the mockup puts above the per-app list. */
 export const ACTIVITY_FILTERS = ["all", "opens", "deploys", "devices"] as const;
 export type ActivityFilter = (typeof ACTIVITY_FILTERS)[number];
+
+export const FILTER_LABELS: Record<ActivityFilter, string> = {
+  all: "All",
+  opens: "Opens",
+  deploys: "Deploys",
+  devices: "Devices",
+};
+
+/**
+ * Filters that would answer "nothing here" whatever happened, and say so.
+ *
+ * The daemon never writes a `deployed` row - that action arrives with
+ * versioning - so this chip can only ever empty the list. Shown disabled with
+ * the reason rather than dropped, which is what the Sharing tab does with
+ * Strict: the mockup's shape is kept, and nothing pretends to work. Delete this
+ * list the moment something writes a deploy.
+ */
+export const UNAVAILABLE_FILTERS: ActivityFilter[] = ["deploys"];
+
+export function filterAvailable(filter: ActivityFilter): boolean {
+  return !UNAVAILABLE_FILTERS.includes(filter);
+}
 
 export function matches(event: AccessEvent, filter: ActivityFilter): boolean {
   switch (filter) {
@@ -145,7 +213,17 @@ export function matches(event: AccessEvent, filter: ActivityFilter): boolean {
     case "deploys":
       return event.action === "deployed";
     case "devices":
-      return ["paired", "denied", "revoked"].includes(event.action);
+      // Everything that changed who may open something - including the request
+      // that started it, and the refusals that follow a revocation. Filtering
+      // to the owner's own decisions would hide the events that explain them.
+      return [
+        "requested",
+        "paired",
+        "denied",
+        "revoked",
+        "refused",
+        "forgotten",
+      ].includes(event.action);
   }
 }
 
@@ -165,6 +243,19 @@ export function ago(at: number, now: number = Date.now() / 1000): string {
     day: "numeric",
     month: "short",
   });
+}
+
+/**
+ * "2m ago", "just now", "12 Aug" - the form the activity rows use.
+ *
+ * [`ago`] is written for the right edge of a dense row, where every character
+ * costs; an activity list has room for the word and reads better with it. Only
+ * the elapsed forms take it: "just now ago" and "12 Aug ago" are both wrong, so
+ * the suffix goes on when the string starts with a number and not otherwise.
+ */
+export function when(at: number, now?: number): string {
+  const short = ago(at, now);
+  return /^\d/.test(short) ? `${short} ago` : short;
 }
 
 /**
