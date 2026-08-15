@@ -1242,6 +1242,63 @@ fn denying_and_revoking_are_told_apart_in_the_log() {
 }
 
 #[test]
+fn forgetting_a_device_shortens_the_list_and_lets_that_browser_ask_again() {
+    // The device list only ever grew: every lost cookie, private window and
+    // rotated session key left a row, and this machine reached thirty-eight
+    // rows for four physical devices. This is the way back out, over the same
+    // socket the window uses.
+    let daemon = Daemon::start();
+    daemon.add_app("Portugal", "<h1>portugal</h1>");
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"portugal".to_string())
+    });
+    daemon.set_visibility("Portugal", "invited");
+
+    let (status, _) = daemon.get_as_stranger("/portugal/");
+    if status == 0 {
+        return;
+    }
+    let devices = daemon.call("device.list", None);
+    let before = devices.as_array().expect("array").len();
+    let Some(id) = devices
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|d| d["status"] == "pending")
+        .map(|d| d["id"].as_str().expect("id").to_string())
+    else {
+        return;
+    };
+
+    daemon.call("device.forget", Some(serde_json::json!({ "id": id })));
+
+    let after = daemon.call("device.list", None);
+    let rows = after.as_array().expect("array");
+    assert_eq!(rows.len(), before - 1, "the row should be gone: {after}");
+    assert!(
+        !rows.iter().any(|d| d["id"] == id.as_str()),
+        "and it should be that row: {after}"
+    );
+
+    // The row is gone; why it went is not. An owner looking back at a list
+    // that used to have a device on it has to be able to find this.
+    let events = daemon.call("log.query", Some(serde_json::json!({ "limit": 20 })));
+    assert!(
+        events
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|e| e["action"] == "forgotten" && e["device_id"] == id.as_str()),
+        "the removal should be in the log: {events}"
+    );
+
+    // And the browser is a stranger again rather than being locked out: it
+    // asks, which is the whole reason this is not a way to refuse anybody.
+    let (again, _) = daemon.get_as_stranger("/portugal/");
+    assert!(again == 200 || again == 403, "unexpected status {again}");
+}
+
+#[test]
 fn approving_an_unknown_device_is_an_error_not_a_silent_success() {
     let daemon = Daemon::start();
 

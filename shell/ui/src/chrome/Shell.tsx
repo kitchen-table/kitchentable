@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { App, SysStatus, Visibility } from "../generated";
 import { Library } from "../Library";
 import { StatusBar } from "../StatusBar";
+import { WorkspaceActivity } from "../surfaces/Activity";
 import { AppDetail } from "../surfaces/AppDetail";
 import { quit } from "../daemon";
 import { useAddApp, useFolderDrop } from "../addApp";
@@ -284,6 +285,9 @@ function Content({
         />
       );
     }
+
+    case "activity":
+      return <WorkspaceActivity apps={apps} onNavigate={onNavigate} />;
 
     default:
       // Filled in as each surface lands; the rail is already routing to them.

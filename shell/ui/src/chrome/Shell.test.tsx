@@ -190,4 +190,14 @@ describe("Shell", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Activity/ }));
     expect(screen.queryByRole("heading", { name: "Library" })).toBeNull();
   });
+
+  it("lands the rail's Activity on the workspace feed, not on a placeholder", async () => {
+    // The rail has routed here since before there was anything to route to.
+    show();
+    fireEvent.click(screen.getByRole("button", { name: /^Activity/ }));
+
+    expect(screen.getByRole("heading", { name: "Activity" })).toBeDefined();
+    expect(screen.getByText("everything across your workspace")).toBeDefined();
+    await waitFor(() => expect(screen.queryByText(/not built yet/)).toBeNull());
+  });
 });

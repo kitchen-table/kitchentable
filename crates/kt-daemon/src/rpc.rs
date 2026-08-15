@@ -378,6 +378,37 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&serde_json::json!({ "renamed": renamed }))
         }
 
+        // Tidying the list, which had no way to shrink. Separate from `revoke`
+        // on purpose and not a stronger version of it: revoking refuses a
+        // device, forgetting stops knowing about it, and a forgotten browser
+        // may ask again. See `Store::forget_device`.
+        "device.forget" => {
+            let id = device_param(request)?;
+            let forgotten = ctx.store.forget_device(&id).map_err(store_error)?;
+            if !forgotten {
+                return Err(KtError {
+                    code: ErrorCode::NotFound,
+                    message: "no such device".into(),
+                    detail: None,
+                });
+            }
+            // Logged even though the row is gone: the log is append-only and
+            // answers "who has seen this", so an owner looking back at why a
+            // device disappeared from the list needs the line that says they
+            // removed it. The id outlives the row here on purpose.
+            if let Err(e) = ctx.store.log_access(&kt_store::AccessEvent {
+                at: now(),
+                app_slug: None,
+                device_id: Some(id.as_str().to_string()),
+                actor: "owner".into(),
+                action: "forgotten".into(),
+                detail: None,
+            }) {
+                tracing::warn!(error = %e, "could not log a device being forgotten");
+            }
+            json(&serde_json::json!({ "forgotten": forgotten }))
+        }
+
         // ---- activity -------------------------------------------------
         "log.query" => {
             let slug = optional_string(request, "slug");
@@ -1264,6 +1295,76 @@ mod tests {
             Some(serde_json::json!({ "id": kt_auth::DeviceId::generate().as_str() })),
         );
         assert_eq!(error(&ctx, &req).code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn forgetting_a_device_takes_it_off_the_list_and_leaves_a_note() {
+        let ctx = context();
+        let d = kt_auth::Device::pending(kt_auth::DeviceId::generate(), "Mozilla/5.0", 1000);
+        ctx.store.upsert_device(&d).expect("inserts");
+
+        let out = result(
+            &ctx,
+            &request(
+                "device.forget",
+                Some(serde_json::json!({ "id": d.id.as_str() })),
+            ),
+        );
+        assert_eq!(out["forgotten"], true);
+        assert!(ctx.store.list_devices().expect("lists").is_empty());
+
+        // The row is gone; the reason it went is not. An owner looking back at
+        // why a device vanished from the list has to find this line.
+        let log = ctx.store.recent_access(None, 10).expect("reads");
+        assert!(log
+            .iter()
+            .any(|e| e.action == "forgotten" && e.device_id.as_deref() == Some(d.id.as_str())));
+    }
+
+    #[test]
+    fn forgetting_a_device_that_does_not_exist_is_not_found() {
+        let ctx = context();
+        let req = request(
+            "device.forget",
+            Some(serde_json::json!({ "id": kt_auth::DeviceId::generate().as_str() })),
+        );
+        assert_eq!(error(&ctx, &req).code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn forgetting_is_not_revoking() {
+        // Two different acts that a caller could easily conflate. Revoking
+        // leaves a row that refuses; forgetting leaves nothing, and that
+        // browser may ask again. If these ever collapse into one method the
+        // window's wording stops being true.
+        let ctx = context();
+        let d = kt_auth::Device::pending(kt_auth::DeviceId::generate(), "Mozilla/5.0", 1000);
+        ctx.store.upsert_device(&d).expect("inserts");
+
+        result(
+            &ctx,
+            &request(
+                "device.revoke",
+                Some(serde_json::json!({ "id": d.id.as_str() })),
+            ),
+        );
+        assert_eq!(
+            ctx.store
+                .get_device(&d.id)
+                .expect("reads")
+                .expect("still there")
+                .status,
+            DeviceStatus::Revoked
+        );
+
+        result(
+            &ctx,
+            &request(
+                "device.forget",
+                Some(serde_json::json!({ "id": d.id.as_str() })),
+            ),
+        );
+        assert_eq!(ctx.store.get_device(&d.id).expect("reads"), None);
     }
 
     #[test]
