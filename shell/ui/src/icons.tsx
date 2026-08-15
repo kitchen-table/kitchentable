@@ -123,13 +123,43 @@ export function PublicIcon(props: IconProps) {
   );
 }
 
-/** A handset: a device wanting to pair. */
+/** A handset: a phone or a tablet. */
 export function DeviceIcon(props: IconProps) {
   return (
     <Svg {...props}>
       <rect x="6" y="2.5" width="12" height="19" rx="3" />
       <line x1="10" y1="18" x2="14" y2="18" />
     </Svg>
+  );
+}
+
+/** A lid and a desk: anything that is not a handset. */
+export function LaptopIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4" y="5" width="16" height="11" rx="2" />
+      <line x1="2" y1="20" x2="22" y2="20" />
+    </Svg>
+  );
+}
+
+/**
+ * Whichever of the two a device is, at the size that shape wants.
+ *
+ * They are not interchangeable at one size: the handset is a tall narrow
+ * outline and the laptop a wide short one, so the mockup draws the laptop two
+ * units larger for the pair to carry the same weight in a column. `size` is the
+ * handset's; the laptop takes care of itself.
+ */
+export function DeviceShapeIcon({
+  shape,
+  size = 17,
+  colour,
+}: IconProps & { shape: "phone" | "laptop" }) {
+  return shape === "phone" ? (
+    <DeviceIcon size={size} colour={colour} />
+  ) : (
+    <LaptopIcon size={size + 2} colour={colour} />
   );
 }
 

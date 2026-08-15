@@ -1,6 +1,12 @@
 import { useState } from "react";
-import { DeviceIcon } from "../icons";
-import { type Device, describeAgent, nameSource, useDeviceActions } from "../devices";
+import { DeviceShapeIcon } from "../icons";
+import {
+  type Device,
+  describeAgent,
+  deviceShape,
+  nameSource,
+  useDeviceActions,
+} from "../devices";
 import { Modal, ModalActions, ModalButton } from "./Modal";
 
 /**
@@ -46,7 +52,7 @@ export function PairingModal({
             justifyContent: "center",
           }}
         >
-          <DeviceIcon size={22} />
+          <DeviceShapeIcon shape={deviceShape(device.user_agent)} size={22} />
         </span>
         <div style={{ minWidth: 0 }}>
           <div style={{ font: "800 17px var(--font-sans)" }}>New device wants access</div>

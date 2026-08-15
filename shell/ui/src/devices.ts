@@ -231,3 +231,27 @@ export function describeAgent(userAgent: string): string {
 
   return system ? `${browser} · ${system}` : browser;
 }
+
+/**
+ * Which of the two device drawings a user agent has earned.
+ *
+ * The mockup draws a handset or a laptop and has no third shape, so this
+ * chooses between them rather than describing anything. The handset is the
+ * specific claim - a phone drawn beside "Chrome · Windows" is simply wrong, and
+ * every row drew one - so only a string that actually puts the device in a hand
+ * gets it. Everything else is a laptop, which covers the desktops and covers
+ * `curl`, since that is somebody at a keyboard.
+ *
+ * Reads the same string as [`describeAgent`] and is wrong in the same places: a
+ * modern iPad calls itself a Macintosh unless it says otherwise. Better a
+ * laptop drawn for a tablet than a handset drawn for every Mac in the house.
+ */
+export function deviceShape(userAgent: string): "phone" | "laptop" {
+  const ua = userAgent.toLowerCase();
+  const handheld =
+    ua.includes("iphone") ||
+    ua.includes("ipad") ||
+    ua.includes("android") ||
+    ua.includes("mobile");
+  return handheld ? "phone" : "laptop";
+}

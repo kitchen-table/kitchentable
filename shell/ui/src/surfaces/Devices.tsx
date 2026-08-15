@@ -6,6 +6,7 @@ import {
   type DeviceGroup,
   approved,
   describeAgent,
+  deviceShape,
   group,
   pending,
   revoked,
@@ -13,7 +14,7 @@ import {
   useDeviceActions,
   useDevices,
 } from "../devices";
-import { DeviceIcon } from "../icons";
+import { DeviceShapeIcon } from "../icons";
 import { Empty, Panel } from "./AppDetail";
 
 /**
@@ -82,8 +83,12 @@ function Waiting({ device }: { device: Device }) {
   return (
     <div
       style={{
-        background: "var(--accent-tint)",
-        border: "1px solid var(--accent-bd)",
+        // Gold, as the mockup has it, and not the accent. Gold is what this
+        // palette uses for something waiting on you - the Household level, the
+        // `requested` row in the activity list - and a device at the door is
+        // exactly that. The accent is for what you press, which here is Review.
+        background: "var(--gold-tint)",
+        border: "1px solid var(--gold-bd)",
         borderRadius: 12,
         padding: 16,
         display: "flex",
@@ -99,14 +104,14 @@ function Waiting({ device }: { device: Device }) {
           height: 38,
           flex: "none",
           borderRadius: 10,
-          background: "var(--paper)",
-          color: "var(--accent)",
+          background: "var(--gold-tint)",
+          color: "var(--gold)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
         }}
       >
-        <DeviceIcon size={19} />
+        <DeviceShapeIcon shape={deviceShape(device.user_agent)} size={18} />
       </span>
 
       <div style={{ flex: 1, minWidth: 180 }}>
@@ -195,7 +200,7 @@ function Row({ group: entry }: { group: DeviceGroup }) {
             justifyContent: "center",
           }}
         >
-          <DeviceIcon size={16} />
+          <DeviceShapeIcon shape={deviceShape(device.user_agent)} size={17} />
         </span>
 
         <div style={{ flex: 1, minWidth: 0 }}>

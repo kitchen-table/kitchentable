@@ -52,10 +52,59 @@ function paramsOf(method: string) {
   return match?.[1] as { method: string; params?: Record<string, unknown> } | undefined;
 }
 
+/**
+ * Which drawing a row got, read off the geometry.
+ *
+ * The icons are `aria-hidden`, which is right - they repeat what the row
+ * already says in words - so there is no accessible name to match on. The two
+ * outlines start at different x, and that is the honest thing to assert.
+ */
+function shapesOn(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("svg")).flatMap((svg) => {
+    const rect = svg.querySelector("rect");
+    if (!rect) return [];
+    return [rect.getAttribute("x") === "6" ? "phone" : "laptop"];
+  });
+}
+
 describe("Devices", () => {
   beforeEach(() => {
     call.mockReset();
     withDevices([]);
+  });
+
+  it("draws a Mac as a laptop and a phone as a phone", async () => {
+    // Every row drew a handset, so a MacBook and a Windows desktop both showed
+    // up in the list as somebody's phone.
+    withDevices([
+      device({
+        id: "mac",
+        status: "approved",
+        name: "Mac",
+        user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1",
+      }),
+      device({
+        id: "phone",
+        status: "approved",
+        name: "Android phone",
+        user_agent: "Mozilla/5.0 (Linux; Android 14) Chrome/120",
+      }),
+    ]);
+    const { container } = show();
+
+    await waitFor(() => expect(screen.getByText("Mac")).toBeDefined());
+    expect(shapesOn(container)).toEqual(["laptop", "phone"]);
+  });
+
+  it("draws anything it cannot place as a laptop, not as a handset", async () => {
+    // `curl` is somebody at a keyboard, and the handset is the specific claim.
+    withDevices([
+      device({ id: "cli", status: "approved", name: "New device", user_agent: "curl/8.4.0" }),
+    ]);
+    const { container } = show();
+
+    await waitFor(() => expect(screen.getByText("New device")).toBeDefined());
+    expect(shapesOn(container)).toEqual(["laptop"]);
   });
 
   it("says so when nothing has ever paired", async () => {
