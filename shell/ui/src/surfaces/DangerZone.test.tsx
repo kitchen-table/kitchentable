@@ -20,6 +20,7 @@ function app(over: Partial<App> = {}): App {
     public_label: "trip",
     url: "http://trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
+    loopback_url: "http://localhost/trip-planner",
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     entry_exists: true,

@@ -22,6 +22,7 @@ function app(over: Partial<App> = {}): App {
     public_label: "trip",
     url: "http://trip.local",
     fallback_url: "http://192.168.0.5/trip",
+    loopback_url: "http://localhost/trip",
     path: "/ws/Trip",
     size_bytes: 42_000,
     deployed_at: 1_760_000_000,
@@ -193,6 +194,25 @@ describe("Sharing: the relay", () => {
     // Switching on is a choice; switching off is a retreat to the safe state
     // and never needs confirming.
     renderSharing({ visibility: "invited", relay: "standard" });
+    fireEvent.click(screen.getByRole("button", { name: "Turn off relay" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("kt_call", {
+        method: "share.set_relay",
+        params: { slug: "trip", mode: "off" },
+      });
+    });
+  });
+
+  it("never strands a published app with no way to unpublish it", async () => {
+    // Reachable in one click: publish as Invited, then set it Private. The
+    // block was hidden outright for those levels, so the relay stayed on with
+    // the switch-off button hidden behind the very change that stranded it.
+    renderSharing({ visibility: "private", relay: "standard" });
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "published but nothing can reach it",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Turn off relay" }));
 
     await waitFor(() => {

@@ -8,6 +8,7 @@ import {
   STRICT_AVAILABLE,
   reachability,
   relayApplies,
+  strandedRelay,
   suggestedFor,
 } from "./relay";
 import { expiry } from "./activity";
@@ -217,6 +218,7 @@ function RelayBlock({
 }) {
   const on = app.relay !== "off";
   const applies = relayApplies(app.visibility);
+  const stranded = strandedRelay(app.visibility, app.relay);
   const status = useStatus(true);
   // The badge reads the tunnel, not the manifest. See `reachability`.
   const reach = reachability(on, status.data?.relay);
@@ -273,7 +275,9 @@ function RelayBlock({
         </p>
       )}
 
-      {!applies && <RelayDoesNotApply level={app.visibility} />}
+      {stranded && <RelayStranded level={app.visibility} />}
+
+      {!applies && !on && <RelayDoesNotApply level={app.visibility} />}
 
       {applies && !on && (
         <div
@@ -327,7 +331,7 @@ function RelayBlock({
         </div>
       )}
 
-      {applies && on && (
+      {on && (
         <>
           <div
             style={{
@@ -402,6 +406,44 @@ function RelayBlock({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Published, at a level the relay can never serve.
+ *
+ * One click away: publish as Invited, then change your mind about who may open
+ * it. Nothing leaks - the gate refuses every relayed request - but the app is
+ * left registered as published, and the owner is left believing one of two
+ * different wrong things depending on which control they happen to look at.
+ *
+ * Said loudly, with the way out immediately below it: the relay block is now
+ * always rendered while the relay is on, precisely so there is one.
+ */
+function RelayStranded({ level }: { level: Visibility }) {
+  const info = VISIBILITY[level];
+  return (
+    <p
+      role="alert"
+      style={{
+        margin: "0 0 10px",
+        background: "var(--gold-tint)",
+        border: "1px solid var(--gold-bd)",
+        borderRadius: 12,
+        padding: "13px 16px",
+        font: "400 12.5px/1.55 var(--font-sans)",
+        color: "var(--ink3)",
+      }}
+    >
+      <b style={{ color: "var(--gold)" }}>
+        This app is published but nothing can reach it.
+      </b>{" "}
+      The relay is on, and <b style={{ fontWeight: 600 }}>{info.label}</b> means
+      it can only ever be opened{" "}
+      {level === "private" ? "on this machine" : "from your home network"} — so
+      every request from outside is refused. Set it back to{" "}
+      <b style={{ fontWeight: 600 }}>Invited</b>, or turn the relay off below.
+    </p>
   );
 }
 

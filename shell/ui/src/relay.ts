@@ -1,4 +1,32 @@
-import type { RelayMode, RelayState, Visibility } from "./generated";
+import type { App, RelayMode, RelayState, Visibility } from "./generated";
+
+/**
+ * Which address to put in front of somebody holding a phone.
+ *
+ * The QR code is the "take this away with you" affordance, so for a published
+ * app the public address is the one worth handing over: it works in the
+ * kitchen *and* on the train, where the `.local` name stops resolving the
+ * moment they leave.
+ *
+ * Gated on the tunnel actually being up, which is the whole point of knowing.
+ * Handing somebody a code that 502s while a working `.local` one was available
+ * would be a worse answer than not offering the public name at all.
+ */
+export function handover(
+  app: App,
+  tunnel: RelayState | undefined,
+): { url: string; away: boolean; alternative?: string } {
+  if (app.public_url && tunnel?.state === "connected") {
+    return { url: app.public_url, away: true, alternative: app.url };
+  }
+  return {
+    url: app.url,
+    away: false,
+    // Only when there is no `.local` to fall back from. Android is the usual
+    // reason a hostname never resolves.
+    alternative: app.hostname === undefined ? app.fallback_url : undefined,
+  };
+}
 
 /**
  * Whether an app is reachable away from home, and on what terms.
@@ -184,7 +212,37 @@ export function suggestedFor(visibility: Visibility): Exclude<RelayMode, "off"> 
  * network. A relayed request can satisfy neither, so a relay switch on either
  * could only ever produce refusals - and an inert switch that can only refuse
  * is the same class of lie as a blurb promising reach it does not have.
+ *
+ * Mirrors `Visibility::reachable_over_relay` in `kt-types`, which is where the
+ * daemon decides the same thing when it works out whether an app has a public
+ * address at all.
+ *
+ * **This governs whether the relay is *offered*, never whether it is shown.**
+ * Hiding the block outright was a trap: publish an app as Invited, set it to
+ * Private, and the whole block disappeared with the relay still switched on
+ * and no way left to switch it off. See `strandedRelay`.
  */
 export function relayApplies(visibility: Visibility): boolean {
   return visibility === "invited" || visibility === "public";
+}
+
+/**
+ * An app that is published at a visibility the relay can never serve.
+ *
+ * Reachable in one click - publish as Invited, then change your mind about who
+ * may open it - and it leaves the app registered as published while every
+ * relayed request is refused. Nothing leaks, because the gate holds. But the
+ * owner is left believing one of two wrong things depending on which control
+ * they look at, so it has to be said out loud and be fixable from here.
+ *
+ * Changing the visibility deliberately does *not* switch the relay off by
+ * itself: publishing and deciding who may open something are separate
+ * decisions, and a side effect in either direction is how an app ends up
+ * somewhere its owner did not put it.
+ */
+export function strandedRelay(
+  visibility: Visibility,
+  mode: RelayMode,
+): boolean {
+  return mode !== "off" && !relayApplies(visibility);
 }

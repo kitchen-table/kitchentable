@@ -40,6 +40,22 @@ impl Visibility {
     pub const fn requires_session(self) -> bool {
         matches!(self, Self::Private | Self::Invited)
     }
+
+    /// Whether a request that arrived over the relay could ever satisfy this
+    /// level.
+    ///
+    /// Private is satisfiable only on loopback and Network means being on the
+    /// home network. A relayed request is neither by construction, so for those
+    /// two the relay can produce nothing but refusals - which makes a public
+    /// address for them a URL that is guaranteed to fail, and a relay switch on
+    /// them a control with no reachable effect.
+    ///
+    /// The rule lives here rather than in the window because it is a fact about
+    /// the visibility model, and because the window was deciding it separately
+    /// and getting a different answer.
+    pub const fn reachable_over_relay(self) -> bool {
+        matches!(self, Self::Invited | Self::Public)
+    }
 }
 
 /// The on-disk `app.json` (docs/architecture.md section 8).
@@ -339,10 +355,26 @@ impl AppRecord {
             // Only for an app whose owner has published it. An unpublished app
             // has no public URL because it is not on the internet, and showing
             // one that 404s would be a worse lie than showing nothing.
-            public_url: match (m.relay.is_published(), &urls.public_host) {
+            // Present only when a request could actually arrive and be served
+            // this way: the owner published it, this install has a name to
+            // publish under, and the visibility is one a relayed request can
+            // satisfy. Setting an app to Private leaves the relay switch alone
+            // - the two are orthogonal on purpose - but it does retire the
+            // address, because from that moment the URL answers 403 to
+            // everybody including the owner, and printing it would be handing
+            // out a link that cannot work.
+            public_url: match (
+                m.relay.is_published() && m.visibility.reachable_over_relay(),
+                &urls.public_host,
+            ) {
                 (true, Some(host)) => Some(format!("https://{host}")),
                 _ => None,
             },
+            // Always loopback, always the owner's own machine. `url` is the
+            // announced `.local` name, which resolves to this machine's *LAN*
+            // address - so it is not loopback, does not earn the own-machine
+            // exemption in the gate, and answers 403 for a Private app.
+            loopback_url: prefix_url.clone(),
             public_label: m.effective_public_label().to_string(),
             path: self.path.clone(),
             // Saturating rather than wrapping: ts-rs maps u64 to bigint, which
@@ -414,6 +446,15 @@ pub struct App {
     /// Always-available IP-and-port URL, for networks where mDNS does not
     /// resolve. Android is the usual reason (docs/architecture.md section 10).
     pub fallback_url: String,
+    /// The loopback URL, for the owner's own browser on this machine.
+    ///
+    /// The one address that is always openable by the owner whatever the
+    /// visibility, because loopback is what the gate exempts. Neither `url` nor
+    /// `fallback_url` is loopback: the announced `.local` name and the IP one
+    /// both resolve to this machine's *LAN* address, which is why opening
+    /// either was answered 403 on a Private app and asked for pairing on an
+    /// Invited one - on the owner's own machine.
+    pub loopback_url: String,
     /// Where this app answers from away from home, once its owner has
     /// published it and an account has claimed a handle.
     ///
@@ -588,6 +629,9 @@ mod tests {
         u.public_host = Some("trip-planner-adarsh.kitchentable.cloud".into());
 
         let mut r = record();
+        // Invited, because Private can never be served over the relay and so
+        // never has a public address whatever the switch says.
+        r.manifest.visibility = Visibility::Invited;
         assert_eq!(r.to_app(&u).public_url, None, "off means no public URL");
 
         r.manifest.relay = RelayMode::Standard;
@@ -598,11 +642,63 @@ mod tests {
     }
 
     #[test]
+    fn setting_a_published_app_to_private_retires_its_public_address() {
+        // Found by publishing an app as Invited and then setting it Private:
+        // the window went on showing a `.cloud` URL that answered 403 to
+        // everybody, the owner included. The relay switch is deliberately left
+        // alone - the two are orthogonal - but the *address* has to go, because
+        // from that moment nothing can arrive on it and be served.
+        let mut u = urls(Some("trip-planner.local"));
+        u.public_host = Some("trip-adarsh.kitchentable.cloud".into());
+
+        let mut r = record();
+        r.manifest.relay = RelayMode::Standard;
+
+        for visibility in [Visibility::Invited, Visibility::Public] {
+            r.manifest.visibility = visibility;
+            assert!(
+                r.to_app(&u).public_url.is_some(),
+                "{visibility:?} is reachable over the relay"
+            );
+        }
+        for visibility in [Visibility::Private, Visibility::Network] {
+            r.manifest.visibility = visibility;
+            assert_eq!(
+                r.to_app(&u).public_url,
+                None,
+                "{visibility:?} can only ever refuse a relayed request, so the URL is a lie"
+            );
+            // And the switch itself is untouched, so the owner still sees it is
+            // on and can turn it off.
+            assert!(r.to_app(&u).relay.is_published());
+        }
+    }
+
+    #[test]
+    fn the_owner_always_has_one_address_that_opens() {
+        // `.local` and the IP URL both resolve to this machine's LAN address,
+        // so neither is loopback and neither earns the own-machine exemption.
+        // Opening a Private app from the window was answered 403 for exactly
+        // that reason.
+        let app = record().to_app(&urls(Some("trip-planner.local")));
+        assert_eq!(app.loopback_url, "http://localhost/trip-planner");
+        assert!(
+            !app.url.contains("localhost"),
+            "the .local name is not loopback"
+        );
+        assert!(
+            !app.fallback_url.contains("localhost"),
+            "the address URL is not loopback either"
+        );
+    }
+
+    #[test]
     fn an_install_with_no_handle_shows_no_public_url_however_published() {
         // Every install today. Publishing without a handle is a real state and
         // not an error, so it shows nothing rather than a half-formed name.
         let mut r = record();
         r.manifest.relay = RelayMode::Standard;
+        r.manifest.visibility = Visibility::Invited;
         assert_eq!(r.to_app(&urls(None)).public_url, None);
     }
 
@@ -614,6 +710,7 @@ mod tests {
         u.public_host = Some("trip-planner-adarsh.kitchentable.cloud".into());
         let mut r = record();
         r.manifest.relay = RelayMode::Standard;
+        r.manifest.visibility = Visibility::Invited;
 
         let app = r.to_app(&u);
         assert!(app.url.starts_with("http://"));

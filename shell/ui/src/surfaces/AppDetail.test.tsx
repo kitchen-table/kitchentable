@@ -22,6 +22,7 @@ function app(over: Partial<App> = {}): App {
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
     fallback_url: "http://192.168.0.5/trip-planner",
+    loopback_url: "http://localhost/trip-planner",
     path: "/ws/Trip Planner",
     size_bytes: 42_000,
     deployed_at: Math.floor(Date.now() / 1000) - 7200,
@@ -107,6 +108,62 @@ describe("AppDetail", () => {
     show();
     await waitFor(() => expect(screen.getByText("2")).toBeDefined());
     expect(screen.getByText("total opens")).toBeDefined();
+  });
+
+  it("shows a published app's public address under its name, on every tab", async () => {
+    // The most prominent URL in the window, and the first place somebody looks
+    // to check a rename took. It showed the `.local` name whatever the app's
+    // public address was.
+    answers({ "sys.status": { relay: { state: "connected" } } });
+    show({ public_url: "https://chester-adarsh.kitchentable.cloud" }, "devices");
+
+    await waitFor(() =>
+      expect(screen.getByText(/chester-adarsh\.kitchentable\.cloud · v3/)).toBeDefined(),
+    );
+  });
+
+  it("opens loopback, which is the only address the owner is exempt on", async () => {
+    // This asserted `.local` until an owner clicked Open on a Private app and
+    // was refused on their own machine. `.local` resolves to this machine's
+    // LAN address, so it is not loopback and earns no exemption: 403 for
+    // Private, and a pairing prompt for Invited.
+    answers({ "sys.status": { relay: { state: "connected" } } });
+    show({
+      visibility: "private",
+      public_url: "https://chester-adarsh.kitchentable.cloud",
+    });
+
+    await waitFor(() => screen.getByRole("link", { name: /Open/ }));
+    expect(screen.getByRole("link", { name: /Open/ }).getAttribute("href")).toBe(
+      "http://localhost/trip-planner",
+    );
+  });
+
+  it("hands a phone the address that still works after they leave", async () => {
+    // The QR is the take-it-with-you affordance, and it was encoding the
+    // `.local` name even for a published app - so it worked at the kitchen
+    // table and nowhere else.
+    answers({
+      "sys.status": { relay: { state: "connected" } },
+    });
+    show({ public_url: "https://trip-adarsh.kitchentable.cloud" });
+
+    await waitFor(() =>
+      expect(screen.getByText("trip-adarsh.kitchentable.cloud")).toBeDefined(),
+    );
+    expect(screen.getByText("Works away from your network")).toBeDefined();
+    // The local name is still offered, for a phone that is in the house.
+    expect(screen.getByText(/or trip-planner\.local/)).toBeDefined();
+  });
+
+  it("keeps the local address when the tunnel is not up", async () => {
+    // Handing somebody a code that 502s, while a working one was available,
+    // would be worse than not offering the public name at all.
+    answers({ "sys.status": { relay: { state: "connecting" } } });
+    show({ public_url: "https://trip-adarsh.kitchentable.cloud" });
+
+    await waitFor(() => expect(screen.getByText("trip-planner.local")).toBeDefined());
+    expect(screen.queryByText("trip-adarsh.kitchentable.cloud")).toBeNull();
   });
 
   it("reports bundle size in human units", () => {
