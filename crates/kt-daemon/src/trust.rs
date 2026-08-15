@@ -20,6 +20,10 @@ pub struct Trust {
     /// Where pairing requests and access go, so the window does not have to
     /// poll for either.
     events: crate::rpc::Events,
+    /// Whether an address this machine holds counts as the owner's own
+    /// machine, as well as loopback. Off only for the end-to-end suite; see
+    /// `own_address`.
+    trust_own_address: bool,
     /// Whether this machine is on a network the owner marked as home.
     ///
     /// Fixed for now. Remembering networks by gateway fingerprint is the next
@@ -51,6 +55,7 @@ impl Trust {
             events,
             discoverer,
             household: true,
+            trust_own_address: std::env::var("KT_NO_OWN_ADDRESS").is_err(),
         }
     }
 
@@ -134,6 +139,30 @@ impl TrustSource for Trust {
 
     fn on_household_network(&self) -> bool {
         self.household
+    }
+
+    /// The same lookup that builds the fallback URL: ask the routing table
+    /// which source address it would use, without sending anything.
+    ///
+    /// Per request on purpose. It is a UDP socket bind and a `connect` that
+    /// puts no packet on the wire, and asking each time is what keeps this
+    /// honest across a DHCP change - a remembered address could later belong to
+    /// somebody else's laptop, and this is the one place an address grants the
+    /// owner's exemption.
+    ///
+    /// `KT_NO_OWN_ADDRESS` turns the widened exemption off, leaving loopback
+    /// only. It exists for the end-to-end suite, whose one way of playing a
+    /// stranger is to connect to this machine's LAN address from this machine -
+    /// which is precisely what this now recognises as the owner. **It can only
+    /// ever take trust away**, which is why it is a switch rather than a way to
+    /// name an address: a variable that could nominate one would be a way to
+    /// hand a stranger the owner's exemption.
+    fn own_address(&self) -> Option<std::net::IpAddr> {
+        if self.trust_own_address {
+            kt_mdns::primary_ipv4().map(std::net::IpAddr::V4)
+        } else {
+            None
+        }
     }
 
     fn redeem(&self, headers: &HeaderMap, token: &str) -> Result<Redemption, String> {

@@ -93,9 +93,25 @@ pub fn session_cookie(value: &str, secure: bool) -> String {
 /// Whether a request came from this machine.
 ///
 /// The owner's own browser must always be able to open a private app without
-/// pairing with itself.
-pub fn is_loopback(addr: Option<std::net::IpAddr>) -> bool {
-    addr.is_some_and(|ip| ip.is_loopback())
+/// pairing with itself - and it reaches this daemon by more than one address.
+/// `localhost` is loopback, but `chores-rota.local` resolves through Bonjour to
+/// this machine's *LAN* address, and so did not count: an owner opening their
+/// own Private app from the window was told "Not available" on their own Mac.
+///
+/// `own` is the address this machine currently holds, asked for per request
+/// rather than remembered. That is the safe direction: an address read once at
+/// startup goes stale when DHCP moves, and the stale value could later belong
+/// to somebody else's laptop, which would hand them the owner's exemption.
+///
+/// **Why an address is trusted here when it is trusted nowhere else.** A device
+/// asserts its identity; it does not assert its address. This one comes from the
+/// accepted socket, and a request whose source is one of *our own* addresses
+/// started on this machine - the kernel routes traffic to a local address
+/// internally, and a different host cannot both claim that address and complete
+/// a TCP handshake from it. It is still only ever a route to the owner's own
+/// exemption, never to anybody else's.
+pub fn is_loopback(addr: Option<std::net::IpAddr>, own: Option<std::net::IpAddr>) -> bool {
+    addr.is_some_and(|ip| ip.is_loopback() || own.is_some_and(|mine| mine == ip))
 }
 
 #[cfg(test)]
@@ -233,11 +249,21 @@ mod tests {
     }
 
     #[test]
-    fn loopback_detection_only_accepts_loopback() {
+    fn this_machine_is_loopback_or_the_address_this_machine_holds() {
         use std::net::IpAddr;
-        assert!(is_loopback(Some(IpAddr::from([127, 0, 0, 1]))));
-        assert!(is_loopback(Some("::1".parse().expect("valid"))));
-        assert!(!is_loopback(Some(IpAddr::from([192, 168, 0, 5]))));
-        assert!(!is_loopback(None));
+        let mine: Option<IpAddr> = Some(IpAddr::from([192, 168, 0, 10]));
+
+        assert!(is_loopback(Some(IpAddr::from([127, 0, 0, 1])), None));
+        assert!(is_loopback(Some("::1".parse().expect("valid")), None));
+
+        // The case that was refusing the owner on their own Mac: `.local`
+        // resolves through Bonjour to this machine's LAN address.
+        assert!(is_loopback(Some(IpAddr::from([192, 168, 0, 10])), mine));
+
+        // And the rest of the house is still the rest of the house. One
+        // address off is a different machine.
+        assert!(!is_loopback(Some(IpAddr::from([192, 168, 0, 11])), mine));
+        assert!(!is_loopback(Some(IpAddr::from([192, 168, 0, 5])), None));
+        assert!(!is_loopback(None, mine));
     }
 }

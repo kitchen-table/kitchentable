@@ -26,6 +26,13 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_with(false)
+    }
+
+    /// `own_address` on means the gate treats this machine's LAN address as
+    /// the owner, which is what a real daemon does and what makes a stranger
+    /// unplayable from one machine. Off for every test that needs a stranger.
+    fn start_with(own_address: bool) -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -49,7 +56,7 @@ impl Daemon {
         let port = 18400 + (std::process::id() % 500) as u16 * 20 + seq as u16;
 
         let daemon = Self {
-            child: spawn(&home, &workspace, port),
+            child: spawn(&home, &workspace, port, own_address),
             home,
             workspace,
             port,
@@ -63,7 +70,7 @@ impl Daemon {
     fn restart(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.child = spawn(&self.home, &self.workspace, self.port);
+        self.child = spawn(&self.home, &self.workspace, self.port, false);
         self.wait_until_ready();
     }
 
@@ -151,9 +158,15 @@ impl Daemon {
         (status, body.to_string())
     }
 
-    /// Connect from the machine's real LAN address rather than 127.0.0.1, so
-    /// the request is not treated as the owner's own browser. This is the only
-    /// way to exercise the gate over a real socket.
+    /// Connect from the machine's real LAN address rather than 127.0.0.1.
+    ///
+    /// This is the only way to exercise the gate over a real socket, and it is
+    /// a stranger **only because `Daemon::start` sets `KT_NO_OWN_ADDRESS`**. A
+    /// real daemon counts its own address as the owner - that is how the
+    /// owner's browser arrives when it follows a `.local` name - so without
+    /// that switch this connects as the owner and every refusal below stops
+    /// meaning what its name says. On a daemon started with the exemption on,
+    /// this is the owner.
     fn get_as_stranger(&self, path: &str) -> (u16, String) {
         let (status, body, _) = self.get_as_stranger_with_cookie(path, None);
         (status, body)
@@ -278,7 +291,7 @@ impl Drop for Daemon {
     }
 }
 
-fn spawn(home: &Path, workspace: &Path, port: u16) -> Child {
+fn spawn(home: &Path, workspace: &Path, port: u16, own_address: bool) -> Child {
     Command::new(daemon_binary())
         .env("HOME", home)
         .env("KT_WORKSPACE", workspace)
@@ -291,6 +304,16 @@ fn spawn(home: &Path, workspace: &Path, port: u16) -> Child {
         // scratch HOME above exists to provide - and on a developer's machine
         // a test run would rewrite the key their real daemon is using.
         .env("KT_NO_KEYCHAIN", "1")
+        // The gate treats an address this machine holds as the owner's own
+        // machine, because that is how the owner's browser arrives when it
+        // follows a `.local` name. This suite's only way of playing a stranger
+        // is to connect to that same address from this same machine, so with
+        // the exemption on there is no stranger left to play. Turning it off
+        // narrows the gate to loopback - it cannot grant anything - and keeps
+        // every refusal below meaning what its name says. The owner's side of
+        // it is covered by `the_owner_opens_a_private_app_at_its_local_name`,
+        // which starts a daemon without this.
+        .envs((!own_address).then_some(("KT_NO_OWN_ADDRESS", "1")))
         .env("RUST_LOG", "warn")
         .spawn()
         .expect("starts the daemon")
@@ -468,6 +491,39 @@ fn every_spelling_of_an_app_root_serves_it() {
 }
 
 // ---- the gate, over a real socket ----
+
+#[test]
+fn the_owner_opens_a_private_app_at_its_local_name() {
+    // Found by an owner pressing Open on their own Private app and being told
+    // "Not available" on their own Mac. `localhost` counted as this machine and
+    // the `.local` name did not, because Bonjour resolves it to this machine's
+    // LAN address - so the same browser, two inches from the files, was
+    // refused.
+    //
+    // This is the only test in the file that runs with the own-address
+    // exemption on, and it is the reason every other one turns it off: with it
+    // on there is no stranger left for this suite to play, because its only way
+    // of being one is to connect to this machine's address from this machine.
+    // The refusal side lives next door, and in kt-server's unit tests where a
+    // neighbour's address can actually be spelled out.
+    let daemon = Daemon::start_with(true);
+    daemon.add_app("Diary", "<h1>secret</h1>");
+    daemon.wait_for("the app", |apps| !slugs(apps).is_empty());
+
+    // Loopback has always worked and still must.
+    let (loopback, _) = daemon.get("/diary/");
+    assert_eq!(loopback, 200, "a private app must open on loopback");
+
+    // And now so does the address the window prints and the QR encodes.
+    let (own, body) = daemon.get_as_stranger("/diary/");
+    if own == 0 {
+        return; // no network on this runner
+    }
+    assert_eq!(
+        own, 200,
+        "a private app must open for the machine it lives on: {body}"
+    );
+}
 
 #[test]
 fn a_private_app_is_refused_to_anyone_but_the_owner() {
