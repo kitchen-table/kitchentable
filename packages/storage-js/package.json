@@ -1,0 +1,15 @@
+{
+  "name": "@kitchentable/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The storage client an app's own JavaScript calls. Served by the daemon at /__kt/storage.js, and degrades to localStorage anywhere else.",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0",
+    "vitest": "^3.2.4"
+  }
+}

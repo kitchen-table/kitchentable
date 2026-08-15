@@ -387,6 +387,22 @@ async fn a_list_is_narrowed_by_prefix() {
 }
 
 #[tokio::test]
+async fn the_client_is_served_and_is_the_one_from_the_package() {
+    // Compiled in rather than copied, so this asserts the real file arrived
+    // rather than a placeholder that happens to be JavaScript.
+    let (status, body) = send(
+        Arc::new(Memory::default()),
+        public(),
+        Call::get("/__kt/storage.js"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("window.kt"), "attaches the global");
+    assert!(body.contains("x-kitchen-table"), "carries the write header");
+}
+
+#[tokio::test]
 async fn a_daemon_serving_no_storage_says_so_rather_than_failing() {
     // Every other test in this crate builds a router without a store, and an
     // embedding that only serves files is a supported shape.

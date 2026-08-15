@@ -315,6 +315,7 @@ fn build<S: AppSource, T: TrustSource>(
         // An app's own data. Static segments again, so they win against the
         // `/{slug}` routes. The key is a wildcard because keys are the app's to
         // choose and `day:1/notes` is a reasonable one.
+        .route(storage::SCRIPT_PATH, get(storage::script))
         .route(storage::PREFIX, get(storage::list::<S, T>))
         .route(
             &format!("{}/{{*key}}", storage::PREFIX),

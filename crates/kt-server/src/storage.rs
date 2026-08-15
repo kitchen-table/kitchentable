@@ -34,6 +34,35 @@ use crate::{AppSource, TrustSource};
 /// live-view script, so an app has one name to avoid rather than two.
 pub const PREFIX: &str = "/__kt/storage";
 
+/// Where an app loads the client from.
+pub const SCRIPT_PATH: &str = "/__kt/storage.js";
+
+/// The client itself, compiled in from the package it is developed and tested
+/// in rather than kept as a second copy here.
+///
+/// `include_str!` on purpose: the file is the artifact, there is no build step
+/// between the two, and moving the package breaks the build rather than
+/// silently serving something stale.
+const CLIENT: &str = include_str!("../../../packages/storage-js/src/index.js");
+
+/// The storage client, the same for every app.
+pub(crate) async fn script() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            // It changes only when the daemon does, and an app holding a stale
+            // copy would be talking to an older API than the one answering.
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        CLIENT,
+    )
+        .into_response()
+}
+
 /// The header a write has to carry.
 ///
 /// A cross-site request cannot set a custom header without a CORS preflight,

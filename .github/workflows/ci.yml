@@ -108,6 +108,13 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         run: pnpm -C shell/ui test
 
+      # The storage client is its own package, so the job above does not reach
+      # it. It ships inside the daemon binary, which makes it the one piece of
+      # JavaScript here that nobody would think to run.
+      - name: test the storage client
+        if: steps.probe.outputs.present == 'true'
+        run: pnpm -C packages/storage-js test
+
   generated-types:
     name: Generated types are current
     runs-on: ubuntu-latest
