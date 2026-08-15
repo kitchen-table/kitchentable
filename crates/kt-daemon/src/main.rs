@@ -19,6 +19,7 @@ mod library;
 mod relay;
 mod rpc;
 mod socket;
+mod storage;
 mod trust;
 
 use library::Library;
@@ -292,7 +293,10 @@ async fn run() -> Result<(), StartupError> {
         library.set_relay_identity(Some((handle, domain)));
     }
 
-    let app = kt_server::router(library, trust, presence_for_http);
+    // Each app's own data, in its own file under the state directory.
+    let app_storage: kt_server::storage::Shared =
+        Arc::new(storage::Apps::new(paths::storage_dir(&home)));
+    let app = kt_server::router_with_storage(library, trust, presence_for_http, app_storage);
 
     // Dial the relay, if this install has one and knows who it is.
     //

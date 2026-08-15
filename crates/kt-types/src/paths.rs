@@ -44,6 +44,15 @@ pub fn system_db_path(home: &str) -> PathBuf {
     state_dir(home).join("system.db")
 }
 
+/// Where each app's own data lives, one database per app.
+///
+/// A directory rather than more tables in `system.db`: an app's data is the
+/// app's, and keeping it in its own file is what makes "one app can never read
+/// another's" a property of the filesystem rather than of every query.
+pub fn storage_dir(home: &str) -> PathBuf {
+    state_dir(home).join("storage")
+}
+
 /// Reads `$HOME`, which every supported platform sets.
 pub fn home() -> Result<String, std::env::VarError> {
     std::env::var("HOME")
