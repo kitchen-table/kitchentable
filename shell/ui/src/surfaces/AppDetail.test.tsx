@@ -122,11 +122,21 @@ describe("AppDetail", () => {
     );
   });
 
-  it("opens loopback, which is the only address the owner is exempt on", async () => {
-    // This asserted `.local` until an owner clicked Open on a Private app and
-    // was refused on their own machine. `.local` resolves to this machine's
-    // LAN address, so it is not loopback and earns no exemption: 403 for
-    // Private, and a pairing prompt for Invited.
+  it("opens the address on screen, on every visibility level", async () => {
+    // This has been both ways round, so the history is worth keeping.
+    //
+    // It asserted `.local`, then loopback after an owner clicked Open on a
+    // Private app and was refused on their own machine - `.local` resolves to
+    // this machine's LAN address, so it is not loopback and earns no exemption
+    // in the gate: 403 for Private, a pairing prompt for Invited.
+    //
+    // It is back to the shown address by an explicit decision of the owner's,
+    // who found a button that went somewhere other than the address printed
+    // two lines above it the worse of the two faults. The 403 is real and is
+    // the gate's answer to show. **Do not quietly restore the substitution** -
+    // if this needs revisiting, the fix is to make Private openable for the
+    // owner from a non-loopback address, which is what the dead `is_owner`
+    // branch in the gate is waiting for.
     answers({ "sys.status": { relay: { state: "connected" } } });
     show({
       visibility: "private",
@@ -135,7 +145,7 @@ describe("AppDetail", () => {
 
     await waitFor(() => screen.getByRole("link", { name: /Open/ }));
     expect(screen.getByRole("link", { name: /Open/ }).getAttribute("href")).toBe(
-      "http://localhost/trip-planner",
+      "http://trip-planner.local",
     );
   });
 

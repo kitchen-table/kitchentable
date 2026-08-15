@@ -1,5 +1,5 @@
 import type { App } from "./generated";
-import { handover, opens } from "./relay";
+import { handover } from "./relay";
 
 function app(over: Partial<App> = {}): App {
   return {
@@ -28,7 +28,7 @@ describe("where Open goes", () => {
     // A button that went somewhere other than the address printed two lines
     // above it is the thing this fixes.
     const shown = handover(app(), { state: "connected" });
-    expect(opens(app(), shown.url)).toBe("http://trip-planner.local");
+    expect(shown.url).toBe("http://trip-planner.local");
   });
 
   it("goes to the public address once an app is published and the tunnel is up", () => {
@@ -39,29 +39,17 @@ describe("where Open goes", () => {
     const shown = handover(published, { state: "connected" });
 
     expect(shown.url).toBe("https://chester-adarsh.kitchentable.cloud");
-    expect(opens(published, shown.url)).toBe("https://chester-adarsh.kitchentable.cloud");
   });
 
-  it("keeps loopback for a Private app, which no other address can open", () => {
-    // Not a preference. `.local` and the public name both resolve to this
-    // machine's LAN address, which earns no owner exemption in the gate, so
-    // either would answer 403 to the person who owns the app.
-    const priv = app({ visibility: "private" });
-    const shown = handover(priv, { state: "connected" });
-
-    expect(shown.url).toBe("http://trip-planner.local");
-    expect(opens(priv, shown.url)).toBe("http://localhost/trip-planner");
-  });
-
-  it("does not dodge the gate for an Invited app", () => {
-    // Its address can refuse - the owner's own browser is let in only if it is
-    // an approved device - but being asked to pair is the product working, and
-    // substituting a different URL would put the button back to opening
-    // something other than what is on screen.
-    const shown = handover(app({ visibility: "invited" }), undefined);
-    expect(opens(app({ visibility: "invited" }), shown.url)).toBe(
-      "http://trip-planner.local",
-    );
+  it("shows the same address on every visibility level", () => {
+    // No substitution anywhere. A Private app is satisfiable only on loopback
+    // and so answers 403 at this address - that is the gate's answer to show,
+    // not one to route around by opening a different URL than the one on
+    // screen. Same for Invited, which may ask the owner to pair.
+    for (const visibility of ["private", "network", "invited", "public"] as const) {
+      const shown = handover(app({ visibility }), { state: "connected" });
+      expect(shown.url, visibility).toBe("http://trip-planner.local");
+    }
   });
 
   it("falls back to the local address when the tunnel is down", () => {

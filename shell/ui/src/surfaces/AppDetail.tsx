@@ -6,7 +6,7 @@ import { type InviteView, Sharing } from "../Sharing";
 import { type AccessEvent, ago, describe, sentence, size } from "../activity";
 import { call, useStatus } from "../daemon";
 import { openInstead } from "../external";
-import { handover, opens } from "../relay";
+import { handover } from "../relay";
 import { useDevices } from "../devices";
 import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
 import { DangerZone } from "./DangerZone";
@@ -38,9 +38,9 @@ export function AppDetail({
   // is its public one: it is the name the owner chose, the name they sent
   // people, and the first place they look to check it took.
   const hand = handover(app, useStatus(true).data?.relay);
-  // Where Open goes: the address on screen, except where that address cannot
-  // let the owner in at all.
-  const target = opens(app, hand.url);
+  // Where Open goes: the address on screen, whatever it is. No substitution,
+  // on any visibility level.
+  const target = hand.url;
 
   // Opening failing silently is the bug this button just had. If the OS will
   // not take the URL, say so and show the address, so it can be pasted.
@@ -137,8 +137,10 @@ export function AppDetail({
           <div style={{ display: "flex", gap: 10, flex: "none" }}>
             <a
               // The address printed two lines above, so pressing Open lands
-              // where the app says it lives. Private is the exception and not a
-              // preference: it is satisfiable only on loopback. See `opens`.
+              // where the app says it lives - on every visibility level. A
+              // Private app is satisfiable only on loopback and so answers 403
+              // here; that is the gate's answer to show, not one to route
+              // around by opening a different URL than the one on screen.
               href={target}
               title={`Open ${target}`}
               target="_blank"
