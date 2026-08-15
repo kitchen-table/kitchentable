@@ -37,7 +37,7 @@ export function Shell({
   const [dropError, setDropError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string[]>([]);
   const { dark, toggle } = useAppearance();
-  const { create, importFolder, pick } = useAddApp();
+  const { create, importFolder, pick, pickFile } = useAddApp();
 
   // Mounted here rather than per-surface: an event that arrives while the
   // Devices tab is closed still has to reach the pairing prompt.
@@ -152,6 +152,7 @@ export function Shell({
           dropping={dropping}
           onCreate={create}
           onPick={pick}
+          onPickFile={pickFile}
           onClose={() => setNewApp(false)}
         />
       )}

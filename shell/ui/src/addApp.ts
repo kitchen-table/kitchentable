@@ -34,7 +34,11 @@ export function useAddApp() {
     [refresh],
   );
 
-  /** An existing folder, copied in. The original is left where it is. */
+  /**
+   * An existing folder **or file**, copied in. The original is left where it
+   * is, and the daemon decides what happens to it - a file arrives as a folder
+   * holding that file, named after it.
+   */
   const importFolder = useCallback(
     async (path: string) => refresh(await call<App>("app.import", { path })),
     [refresh],
@@ -47,7 +51,31 @@ export function useAddApp() {
     return importFolder(chosen);
   }, [importFolder]);
 
-  return { create, importFolder, pick };
+  /**
+   * The native file picker, for the single file that is the whole app.
+   *
+   * A separate call from [`pick`] because the platform dialog is one or the
+   * other: `directory` is a boolean, and macOS's panel cannot be asked for
+   * "either" through this plugin. Two affordances beats a picker that silently
+   * refuses half of what the dialog above it offers to host - which is the bug
+   * this exists to fix.
+   *
+   * One file, one app. Several chosen at once are several apps, the same rule
+   * folders already follow: a page and its stylesheet belong in a folder, and
+   * guessing which of a selection is the entry is how the wrong thing gets
+   * served.
+   */
+  const pickFile = useCallback(async (): Promise<App[] | null> => {
+    const chosen = await open({ directory: false, multiple: true });
+    const paths = typeof chosen === "string" ? [chosen] : chosen;
+    if (!paths || paths.length === 0) return null;
+
+    const made: App[] = [];
+    for (const path of paths) made.push(await importFolder(path));
+    return made;
+  }, [importFolder]);
+
+  return { create, importFolder, pick, pickFile };
 }
 
 /** What a drop is doing right now, for the drop target's own styling. */

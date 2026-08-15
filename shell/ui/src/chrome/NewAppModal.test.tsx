@@ -5,20 +5,70 @@ import { NewAppModal, slugify } from "./NewAppModal";
 function show(over: Partial<Parameters<typeof NewAppModal>[0]> = {}) {
   const onCreate = vi.fn().mockResolvedValue({ slug: "packing-list" });
   const onPick = vi.fn().mockResolvedValue({ slug: "trip-planner" });
+  const onPickFile = vi.fn().mockResolvedValue([{ slug: "sunday-menu" }]);
   const onClose = vi.fn();
   const view = render(
     <NewAppModal
       workspace="/ws"
       onCreate={onCreate}
       onPick={onPick}
+      onPickFile={onPickFile}
       onClose={onClose}
       {...over}
     />,
   );
-  return { ...view, onCreate, onPick, onClose };
+  return { ...view, onCreate, onPick, onPickFile, onClose };
 }
 
 describe("NewAppModal", () => {
+  it("offers a file as well as a folder, because it says it hosts both", async () => {
+    // The dialog listed "HTML, CSS, JS, PDFs, images" under a picker that
+    // would only accept a directory, so the single file somebody most wants to
+    // hand round was the one thing it could not take.
+    const { onPickFile, onPick, onClose } = show();
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
+
+    await waitFor(() => expect(onPickFile).toHaveBeenCalled());
+    expect(onPick).not.toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("says a file may be dropped, not only a folder", () => {
+    show();
+    expect(screen.getByText("Drop a folder or a file here")).toBeDefined();
+    // And both ways in are offered at the same weight. The drop zone used to
+    // be the button, and it opened a folder-only picker - so the obvious thing
+    // to press silently refused half of what this dialog offers to host.
+    expect(screen.getByRole("button", { name: "Choose a folder" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Choose a file" })).toBeDefined();
+  });
+
+  it("stays open when the file picker is cancelled", async () => {
+    // Cancelling is not a failure and not a success; closing the dialog on it
+    // would throw away the name somebody had already typed.
+    const onPickFile = vi.fn().mockResolvedValue(null);
+    const { onClose } = show({ onPickFile });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
+
+    await waitFor(() => expect(onPickFile).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows what the daemon said when a file cannot be brought in", async () => {
+    const onPickFile = vi.fn().mockRejectedValue({
+      message: '"/ws/Site/index.html" is already in your workspace',
+    });
+    show({ onPickFile });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose a file" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/already in your workspace/)).toBeDefined(),
+    );
+  });
+
   it("creates an app from a typed name", async () => {
     const { onCreate, onClose } = show();
 
@@ -62,7 +112,7 @@ describe("NewAppModal", () => {
   it("opens the folder picker from the drop zone", async () => {
     const { onPick, onClose } = show();
 
-    fireEvent.click(screen.getByRole("button", { name: /Drop a folder here/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder" }));
 
     await waitFor(() => expect(onPick).toHaveBeenCalled());
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -73,7 +123,7 @@ describe("NewAppModal", () => {
     const onPick = vi.fn().mockResolvedValue(null);
     const { onClose } = show({ onPick });
 
-    fireEvent.click(screen.getByRole("button", { name: /Drop a folder here/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose a folder" }));
 
     await waitFor(() => expect(onPick).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();

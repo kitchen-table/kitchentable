@@ -302,6 +302,13 @@ fn is_hidden(path: &Path) -> bool {
 /// Ambiguity is left alone: several pages and no `index.html` means we have no
 /// basis to pick, so the default stands and the app is flagged as having no
 /// entry rather than opening on whichever file sorted first.
+///
+/// The last fallback is the same rule with the page requirement dropped: a
+/// folder holding exactly one file opens on it, whatever it is. That is what
+/// makes a single PDF or image an app - a browser renders both perfectly well -
+/// and it is unambiguous for the same reason the lone-page case is. It is also
+/// the other half of importing a file, which arrives here as a folder with one
+/// thing in it.
 fn choose_entry(folder: &Path) -> String {
     const DEFAULT: &str = "index.html";
 
@@ -316,18 +323,27 @@ fn choose_entry(folder: &Path) -> String {
         return DEFAULT.to_string();
     };
 
-    let mut pages: Vec<String> = entries
+    let mut files: Vec<String> = entries
         .flatten()
         .filter(|entry| entry.path().is_file() && !is_hidden(&entry.path()))
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let lower = name.to_lowercase();
-            (lower.ends_with(".html") || lower.ends_with(".htm")).then_some(name)
-        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
 
-    match pages.len() {
-        1 => pages.remove(0),
+    let mut pages: Vec<String> = files
+        .iter()
+        .filter(|name| {
+            let lower = name.to_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+        .cloned()
+        .collect();
+
+    match (pages.len(), files.len()) {
+        // One page among its assets: the export case this was written for.
+        (1, _) => pages.remove(0),
+        // No page at all, and nothing to weigh it against. A folder holding
+        // only `menu.pdf` opens on `menu.pdf`.
+        (0, 1) => files.remove(0),
         _ => DEFAULT.to_string(),
     }
 }
@@ -474,11 +490,51 @@ mod tests {
     fn an_app_whose_entry_is_missing_is_flagged() {
         // The app is otherwise healthy - registered, announced, gated - so
         // nothing else would ever reveal that its root URL is a 404.
-        let ws = workspace_with(&[("Empty", &[("notes.txt", "no page here")])]);
+        //
+        // Several files and no page is the case that matters and the one this
+        // was written for: a folder of assets with nothing to open. A folder
+        // holding exactly one file is not ambiguous and opens on it, whatever
+        // it is - see the two tests below.
+        let ws = workspace_with(&[(
+            "Empty",
+            &[("notes.txt", "no page here"), ("more.txt", "still none")],
+        )]);
         let apps = Registry::new(ws.path()).scan().expect("scans");
 
         assert_eq!(apps.len(), 1);
         assert!(!apps[0].entry_exists);
+    }
+
+    #[test]
+    fn a_folder_holding_one_file_opens_on_it_whatever_it_is() {
+        // What makes a single PDF an app. The window offered to host "HTML,
+        // CSS, JS, PDFs, images" while nothing but a folder could be brought
+        // in, and a PDF that did arrive had no entry and looked broken.
+        for (name, file) in [
+            ("Menu", "menu.pdf"),
+            ("Poster", "poster.png"),
+            ("Readme", "readme.txt"),
+        ] {
+            let ws = workspace_with(&[(name, &[(file, "bytes")])]);
+            let apps = Registry::new(ws.path()).scan().expect("scans");
+
+            assert_eq!(apps[0].manifest.entry, file, "{name} should open on {file}");
+            assert!(apps[0].entry_exists, "{name} is not broken");
+        }
+    }
+
+    #[test]
+    fn a_lone_page_still_beats_a_lone_file_among_assets() {
+        // The rule that came first stays first: one page among its assets is
+        // the entry, and the file count is only consulted when there is no
+        // page at all.
+        let ws = workspace_with(&[(
+            "Export",
+            &[("Design.html", "<h1>hi</h1>"), ("style.css", "body{}")],
+        )]);
+        let apps = Registry::new(ws.path()).scan().expect("scans");
+
+        assert_eq!(apps[0].manifest.entry, "Design.html");
     }
 
     #[test]

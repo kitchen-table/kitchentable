@@ -15,6 +15,7 @@ export function NewAppModal({
   dropping,
   onCreate,
   onPick,
+  onPickFile,
   onClose,
 }: {
   workspace?: string;
@@ -23,6 +24,8 @@ export function NewAppModal({
   onCreate: (name: string) => Promise<unknown>;
   /** Opens the native folder picker. Resolves to null if cancelled. */
   onPick: () => Promise<unknown | null>;
+  /** Opens the native file picker. Resolves to null if cancelled. */
+  onPickFile: () => Promise<unknown | null>;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
@@ -49,6 +52,7 @@ export function NewAppModal({
 
   const create = () => (slug ? run(() => onCreate(name.trim()), true) : undefined);
   const pick = () => run(onPick);
+  const pickFile = () => run(onPickFile);
 
   return (
     <Modal title="Add an app" onClose={onClose}>
@@ -56,20 +60,20 @@ export function NewAppModal({
         Any folder becomes an app automatically. No config required to start.
       </ModalHeading>
 
-      <button
-        type="button"
-        onClick={pick}
-        disabled={working}
+      {/* A drop target rather than a button. It used to be one, and clicking
+          it opened a folder-only picker - so the obvious thing to press
+          silently refused half of what the dialog offered to host. The two
+          ways in are now spelled out below it, as equals. */}
+      <div
         style={{
           display: "block",
           width: "100%",
           border: `2px dashed ${dropping ? "var(--accent)" : "var(--dash)"}`,
           background: dropping ? "var(--accent-tint)" : "transparent",
           borderRadius: 14,
-          padding: 34,
+          padding: "28px 34px 24px",
           textAlign: "center",
           marginBottom: 16,
-          cursor: working ? "wait" : "pointer",
           transition: "border-color .15s, background .15s",
         }}
       >
@@ -98,18 +102,28 @@ export function NewAppModal({
             marginBottom: 4,
           }}
         >
-          {dropping ? "Copying it in…" : "Drop a folder here"}
+          {dropping ? "Copying it in…" : "Drop a folder or a file here"}
         </span>
         <span
           style={{ display: "block", font: "400 12px var(--font-mono)", color: "var(--muted)" }}
         >
-          or click to choose · HTML, CSS, JS, PDFs, images
+          a folder, or a single page, PDF or image
         </span>
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 14 }}>
+          <ChooseButton onClick={pick} disabled={working}>
+            Choose a folder
+          </ChooseButton>
+          <ChooseButton onClick={pickFile} disabled={working}>
+            Choose a file
+          </ChooseButton>
+        </div>
+
         {workspace && (
           <span
             style={{
               display: "block",
-              marginTop: 10,
+              marginTop: 12,
               font: "400 11px var(--font-mono)",
               color: "var(--faint)",
               wordBreak: "break-all",
@@ -118,7 +132,7 @@ export function NewAppModal({
             copied into {workspace}
           </span>
         )}
-      </button>
+      </div>
 
       <label style={{ display: "block", marginBottom: 16 }}>
         <span
@@ -211,6 +225,44 @@ export function NewAppModal({
  * message is already written for a person - "Trip Planner is already in your
  * workspace" - so it is shown as-is.
  */
+/**
+ * One of the two ways in, drawn the same as the other.
+ *
+ * Two buttons rather than a cleverer single one: the platform dialog is a
+ * folder picker or a file picker - `directory` is a boolean, and macOS cannot
+ * be asked for either through this plugin. Equal weight because neither is the
+ * unusual case: a folder is a site, a file is a menu.
+ */
+function ChooseButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        border: "1px solid var(--border2)",
+        borderRadius: 9,
+        padding: "8px 14px",
+        background: "var(--paper)",
+        color: "var(--ink2)",
+        font: "600 12.5px var(--font-sans)",
+        cursor: disabled ? "wait" : "pointer",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function message(raw: unknown): string {
   if (typeof raw === "object" && raw !== null && "message" in raw) {
     return String((raw as { message: unknown }).message);
