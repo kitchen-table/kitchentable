@@ -202,4 +202,44 @@ describe("WorkspaceActivity", () => {
     show(<WorkspaceActivity apps={[app()]} onNavigate={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Nothing has happened yet/)).toBeDefined());
   });
+
+  it("does not say the app at both ends of the same row", async () => {
+    answers({ "log.query": [event({ app_slug: "trip-planner" })] });
+    show(<WorkspaceActivity apps={[app()]} onNavigate={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText(/opened it/)).toBeDefined());
+    expect(screen.queryByText(/opened the app/)).toBeNull();
+  });
+
+  it("draws every tile alike, including a row that names no app", async () => {
+    // Some workspace events have no app - pairing a device is the common one.
+    // Deciding a row's shape from its own slug gave those the single-app
+    // treatment, so a smaller tile in a different colour sat in the middle of
+    // the column and bent it.
+    answers({
+      "log.query": [
+        event({ app_slug: "trip-planner" }),
+        event({ action: "paired", actor: "owner", at: NOW - 300 }),
+      ],
+    });
+    const { container } = show(
+      <WorkspaceActivity apps={[app()]} onNavigate={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(screen.getByText(/was let in/)).toBeDefined());
+    const tiles = Array.from(
+      container.querySelectorAll<HTMLElement>('span[aria-hidden="true"]'),
+    );
+    expect(tiles).toHaveLength(2);
+    expect(new Set(tiles.map((tile) => tile.style.width))).toEqual(
+      new Set(["32px"]),
+    );
+
+    // The one with an app says which app, in colour and nothing else. The one
+    // without falls back to saying what happened, because a blank tile on a
+    // row that names no app answers nothing at all.
+    const [withApp, withoutApp] = tiles;
+    expect(withApp?.textContent).toBe("");
+    expect(withoutApp?.textContent).toBe("✓");
+  });
 });

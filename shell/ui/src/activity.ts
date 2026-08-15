@@ -137,9 +137,34 @@ export function who(event: AccessEvent, deviceName?: string): string {
   }
 }
 
-/** "Kitchen iPad opened the app". The row title the mockup draws. */
-export function sentence(event: AccessEvent, deviceName?: string): string {
-  return `${who(event, deviceName)} ${describe(event.action).phrase}`;
+/**
+ * The same phrase again, for a list that has already named the app.
+ *
+ * The workspace list puts the app at the head of every row, so the per-app
+ * wording says it twice: "Chores Rota · Someone opened the app". The mockup's
+ * global rows read "opened it" for exactly this reason. Only actions whose
+ * wording mentions the app need an entry here; the rest are already about the
+ * device rather than the thing it opened.
+ */
+const IN_CONTEXT: Record<string, string> = {
+  opened: "opened it",
+};
+
+/**
+ * "Kitchen iPad opened the app". The row title the mockup draws.
+ *
+ * `appNamed` picks the shorter wording for a list that has already said which
+ * app this is about.
+ */
+export function sentence(
+  event: AccessEvent,
+  deviceName?: string,
+  options?: { appNamed?: boolean },
+): string {
+  const phrase =
+    (options?.appNamed ? IN_CONTEXT[event.action] : undefined) ??
+    describe(event.action).phrase;
+  return `${who(event, deviceName)} ${phrase}`;
 }
 
 /**
