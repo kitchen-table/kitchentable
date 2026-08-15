@@ -265,6 +265,24 @@ describe("AppDetail", () => {
     );
   });
 
+  it("keeps the recent-activity panel to three rows, as the mockup does", async () => {
+    // The panel is a glance with "View all" under it, not a short copy of the
+    // Activity tab, and the mockup draws three.
+    answers({
+      "log.query": Array.from({ length: 6 }, (_, index) => ({
+        at: 1000 - index,
+        actor: "viewer",
+        action: "opened",
+      })),
+    });
+
+    show();
+    await waitFor(() =>
+      expect(screen.getAllByText(/opened the app/).length).toBeGreaterThan(0),
+    );
+    expect(screen.getAllByText(/opened the app/)).toHaveLength(3);
+  });
+
   it("falls back to the actor when the device is not one we know", () => {
     answers({ "log.query": [{ at: 1, actor: "owner", action: "opened" }] });
 

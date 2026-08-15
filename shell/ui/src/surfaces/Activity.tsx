@@ -196,6 +196,11 @@ function Feed({
             device={event.device_id ? devices.get(event.device_id) : undefined}
             app={event.app_slug && appOf ? appOf(event.app_slug) : undefined}
             slug={event.app_slug ?? undefined}
+            // A property of the list, not of the row. Some workspace-level
+            // events have no app at all - pairing a device is the common one -
+            // and deciding the row's shape from its own slug drew those a
+            // different size, which bent the column they sit in.
+            spansApps={appOf !== undefined}
           />
         ))
       )}
@@ -206,24 +211,32 @@ function Feed({
 /**
  * One row: what happened, the detail under it, and when.
  *
- * The glyph tile carries the app's colour when the list spans apps and the
- * action's colour when it does not - which is the mockup's rule, and a sound
- * one: in a mixed list the first thing you scan for is which app, and in a
- * single-app list that question is already answered by the page you are on.
+ * The tile answers the most specific question the row leaves open. Across apps
+ * that is *which app*, so it is the app's own colour and carries nothing else,
+ * the same square the library draws - a colour learnt in one place reads in the
+ * other. Within one app that question is already answered by the page you are
+ * on, so the tile spends itself on *what happened* instead. Both are the
+ * mockup's rule.
+ *
+ * The size, though, is a property of the list and not of the row. A
+ * workspace-level event has no app at all - pairing a device is the common one,
+ * and the mockup has no such row - and sizing from the row's own slug put a
+ * smaller tile in the middle of a column of larger ones.
  */
 function ActivityRow({
   event,
   device,
   app,
   slug,
+  spansApps,
 }: {
   event: AccessEvent;
   device?: Device;
   app?: { name: string; onOpen?: () => void };
   slug?: string;
+  spansApps: boolean;
 }) {
   const kind = describe(event.action);
-  const mixed = app !== undefined;
 
   return (
     <div
@@ -231,26 +244,30 @@ function ActivityRow({
         display: "flex",
         alignItems: "center",
         gap: 14,
-        padding: mixed ? "14px 0" : "13px 0",
+        padding: spansApps ? "14px 0" : "13px 0",
         borderBottom: "1px solid var(--divider)",
       }}
     >
       <span
         aria-hidden="true"
         style={{
-          width: mixed ? 32 : 30,
-          height: mixed ? 32 : 30,
+          width: spansApps ? 32 : 30,
+          height: spansApps ? 32 : 30,
           borderRadius: 8,
           flex: "none",
-          background: mixed && slug ? tileColour(slug) : kind.tint,
-          color: mixed ? "#fff" : kind.colour,
+          background: spansApps && slug ? tileColour(slug) : kind.tint,
+          color: kind.colour,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           font: "600 12px var(--font-mono)",
         }}
       >
-        {kind.glyph}
+        {/* An app to name, so the colour is the whole answer. Without one -
+            pairing a device is workspace-level - the tile has nothing to say
+            about which app, so it answers what happened instead. The size does
+            not change either way, which is what keeps the column straight. */}
+        {spansApps && slug ? null : kind.glyph}
       </span>
 
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -282,7 +299,7 @@ function ActivityRow({
               <b style={{ fontWeight: 700 }}>{app.name}</b>
             ))}
           {app && " · "}
-          {sentence(event, device?.name)}
+          {sentence(event, device?.name, { appNamed: app !== undefined })}
         </div>
         <div
           style={{

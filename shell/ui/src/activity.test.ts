@@ -86,6 +86,25 @@ describe("activity", () => {
       expect(sentence(event())).toBe("Someone opened the app");
       expect(sentence(event({ actor: "owner" }))).toBe("You opened the app");
     });
+
+    it("stops saying the app twice once the row has already named it", () => {
+      // "Chores Rota · Someone opened the app" says it at both ends.
+      expect(sentence(event(), undefined, { appNamed: true })).toBe(
+        "Someone opened it",
+      );
+      expect(sentence(event(), "Kitchen iPad", { appNamed: true })).toBe(
+        "Kitchen iPad opened it",
+      );
+    });
+
+    it("leaves the wording alone where the app was never in it", () => {
+      // Only actions whose phrase mentions the app need a second form; pairing
+      // a device is about the device, wherever the row is drawn.
+      const paired = event({ action: "paired" });
+      expect(sentence(paired, undefined, { appNamed: true })).toBe(
+        sentence(paired),
+      );
+    });
   });
 
   describe("filters", () => {

@@ -404,7 +404,10 @@ function Overview({
             </Empty>
           ) : (
             <div style={{ display: "flex", flexDirection: "column" }}>
-              {events.slice(0, 5).map((event, index) => (
+              {/* Three, as the mockup draws it. The panel is a glance with
+                  "View all" underneath it, not a short version of the
+                  Activity tab. */}
+              {events.slice(0, 3).map((event, index) => (
                 <Row
                   key={`${event.at}-${index}`}
                   event={event}
