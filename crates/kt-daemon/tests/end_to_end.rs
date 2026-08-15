@@ -490,6 +490,41 @@ fn every_spelling_of_an_app_root_serves_it() {
     }
 }
 
+#[test]
+fn a_single_file_becomes_an_app_that_serves_it() {
+    // The window offered to host "HTML, CSS, JS, PDFs, images" while every
+    // import path refused anything but a directory. This is the whole way
+    // through: a file arrives over the socket, the registry picks it as the
+    // entry, and the server hands it back at the app's root.
+    let daemon = Daemon::start();
+
+    let outside = daemon.workspace.parent().expect("parent").join("elsewhere");
+    std::fs::create_dir_all(&outside).expect("creates");
+    let file = outside.join("Sunday Menu.pdf");
+    std::fs::write(&file, "%PDF-1.4 pretend").expect("writes");
+
+    let made = daemon.call(
+        "app.import",
+        Some(serde_json::json!({ "path": file.display().to_string() })),
+    );
+
+    // Named after the file without its extension, and opening on the file.
+    assert_eq!(made["name"], "Sunday Menu");
+    assert_eq!(made["entry"], "Sunday Menu.pdf");
+    assert_eq!(made["entry_exists"], true, "not a broken app: {made}");
+
+    daemon.wait_for("the app to appear", |apps| {
+        slugs(apps).contains(&"sunday-menu".to_string())
+    });
+
+    let (status, body) = daemon.get("/sunday-menu/");
+    assert_eq!(status, 200, "the file should be served at the app's root");
+    assert!(body.contains("%PDF-1.4"), "got {body}");
+
+    // The original is where they left it. This is a copy, and the window says so.
+    assert!(file.exists(), "the source file is untouched");
+}
+
 // ---- the gate, over a real socket ----
 
 #[test]

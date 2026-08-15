@@ -15,6 +15,7 @@ export function NewAppModal({
   dropping,
   onCreate,
   onPick,
+  onPickFile,
   onClose,
 }: {
   workspace?: string;
@@ -23,6 +24,8 @@ export function NewAppModal({
   onCreate: (name: string) => Promise<unknown>;
   /** Opens the native folder picker. Resolves to null if cancelled. */
   onPick: () => Promise<unknown | null>;
+  /** Opens the native file picker. Resolves to null if cancelled. */
+  onPickFile: () => Promise<unknown | null>;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
@@ -49,6 +52,7 @@ export function NewAppModal({
 
   const create = () => (slug ? run(() => onCreate(name.trim()), true) : undefined);
   const pick = () => run(onPick);
+  const pickFile = () => run(onPickFile);
 
   return (
     <Modal title="Add an app" onClose={onClose}>
@@ -98,12 +102,12 @@ export function NewAppModal({
             marginBottom: 4,
           }}
         >
-          {dropping ? "Copying it in…" : "Drop a folder here"}
+          {dropping ? "Copying it in…" : "Drop a folder or a file here"}
         </span>
         <span
           style={{ display: "block", font: "400 12px var(--font-mono)", color: "var(--muted)" }}
         >
-          or click to choose · HTML, CSS, JS, PDFs, images
+          or click to choose a folder
         </span>
         {workspace && (
           <span
@@ -118,6 +122,30 @@ export function NewAppModal({
             copied into {workspace}
           </span>
         )}
+      </button>
+
+      {/* The dialog used to list "HTML, CSS, JS, PDFs, images" under a picker
+          that would only accept a directory, so the single file somebody most
+          wants to hand round - a menu, a rota, a saved page - was the one thing
+          it could not take. A second button rather than a cleverer first one:
+          the platform dialog is a folder picker or a file picker, never both. */}
+      <button
+        type="button"
+        onClick={pickFile}
+        disabled={working}
+        style={{
+          display: "block",
+          width: "100%",
+          border: "none",
+          background: "none",
+          padding: "0 0 16px",
+          textAlign: "center",
+          font: "500 12px var(--font-sans)",
+          color: "var(--accent)",
+          cursor: working ? "wait" : "pointer",
+        }}
+      >
+        Or choose a single file — a PDF, an image, one page
       </button>
 
       <label style={{ display: "block", marginBottom: 16 }}>

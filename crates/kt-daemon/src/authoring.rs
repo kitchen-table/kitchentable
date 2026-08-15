@@ -159,16 +159,35 @@ pub fn create(workspace: &Path, name: &str) -> Result<PathBuf, AuthorError> {
     Ok(folder)
 }
 
-/// Copy an existing folder into the workspace. Returns the folder that was made.
+/// Copy an existing folder **or a single file** into the workspace. Returns the
+/// folder that was made.
 ///
 /// A copy rather than a move: the source is someone's own directory, in their
 /// own filesystem, and quietly relocating it is not ours to do. The UI says so.
+///
+/// **A file becomes a folder holding that file**, named after it: `menu.pdf`
+/// arrives as an app called `menu` serving `menu.pdf`. Everything downstream -
+/// the registry, the gate, the server, `app.json` - deals in folders, and one
+/// exception threaded through all of them to save a directory would be a poor
+/// trade. This is the same thing a person would do in Finder, done for them.
+///
+/// It exists because the window said so. "HTML, CSS, JS, PDFs, images" sat
+/// under the drop target while every path here refused anything but a
+/// directory, so the one file somebody most wants to hand round - a menu, a
+/// rota, a saved page - was the one thing that could not be dropped in.
+///
+/// The file keeps its name rather than being renamed to `index.html`. Nothing
+/// here rewrites anybody's content, and the registry already knows how to pick
+/// a single page as the entry; extending that to a single file of any kind is
+/// where that decision belongs.
 pub fn import(workspace: &Path, source: &Path) -> Result<PathBuf, AuthorError> {
     let source = source
         .canonicalize()
         .map_err(|_| AuthorError::Missing(source.display().to_string()))?;
 
-    if !source.is_dir() {
+    let is_dir = source.is_dir();
+    if !is_dir && !source.is_file() {
+        // A socket, a device node, a broken link. Nothing to serve.
         return Err(AuthorError::NotAFolder(source.display().to_string()));
     }
 
@@ -184,18 +203,45 @@ pub fn import(workspace: &Path, source: &Path) -> Result<PathBuf, AuthorError> {
         ));
     }
     // Copying a parent of the workspace into the workspace never terminates.
+    // Only a directory can contain it, so this cannot fire for a file.
     if root.starts_with(&source) {
         return Err(AuthorError::ContainsWorkspace(source.display().to_string()));
     }
 
-    let wanted = source
+    let file_name = source
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .ok_or_else(|| AuthorError::NameUnusable(source.display().to_string()))?;
-    let wanted = folder_name(&wanted)?;
+
+    // A folder is named after itself; a file's app is named after the file
+    // without its extension, because "menu" is an app and "menu.pdf" is a file.
+    let wanted = folder_name(if is_dir {
+        &file_name
+    } else {
+        source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            // A name that is nothing but an extension - `.zshrc` - has no stem
+            // worth using, so the whole name stands and `folder_name` strips
+            // the leading dot that would otherwise make the app hidden.
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(&file_name)
+    })?;
 
     let destination = root.join(unique_in(&root, &wanted));
-    copy_tree(&source, &destination)?;
+
+    if is_dir {
+        copy_tree(&source, &destination)?;
+    } else {
+        let io = |path: &Path, source: std::io::Error| AuthorError::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        std::fs::create_dir_all(&destination).map_err(|e| io(&destination, e))?;
+        let inside = destination.join(&file_name);
+        std::fs::copy(&source, &inside).map_err(|e| io(&inside, e))?;
+    }
+
     Ok(destination)
 }
 
@@ -393,19 +439,105 @@ mod tests {
     }
 
     #[test]
-    fn importing_a_file_or_a_missing_path_is_refused() {
+    fn a_missing_path_is_refused() {
         let ws = workspace();
         let outside = workspace();
-        let file = outside.path().join("page.html");
+        assert!(matches!(
+            import(ws.path(), &outside.path().join("nope")),
+            Err(AuthorError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn a_single_file_becomes_an_app_named_after_it() {
+        // The window offered "HTML, CSS, JS, PDFs, images" under its drop
+        // target while every path here refused anything but a directory, so
+        // the one file somebody most wants to hand round could not be dropped
+        // in at all.
+        let ws = workspace();
+        let outside = workspace();
+        let file = outside.path().join("Sunday Menu.pdf");
+        std::fs::write(&file, "%PDF-1.4 pretend").expect("writes");
+
+        let folder = import(ws.path(), &file).expect("imports");
+
+        // Named without the extension: "Sunday Menu" is an app, "Sunday
+        // Menu.pdf" is a file.
+        assert_eq!(folder.file_name().expect("name"), "Sunday Menu");
+        assert_eq!(
+            std::fs::read_to_string(folder.join("Sunday Menu.pdf")).expect("reads"),
+            "%PDF-1.4 pretend"
+        );
+        assert!(file.exists(), "the original is untouched");
+    }
+
+    #[test]
+    fn an_imported_file_keeps_its_own_name() {
+        // Renaming it to `index.html` would be this module rewriting somebody's
+        // content, and the registry already knows how to open a folder holding
+        // one file. Two places deciding that is how they drift.
+        let ws = workspace();
+        let outside = workspace();
+        let file = outside.path().join("rota.html");
+        std::fs::write(&file, "<h1>rota</h1>").expect("writes");
+
+        let folder = import(ws.path(), &file).expect("imports");
+
+        assert!(folder.join("rota.html").is_file());
+        assert!(!folder.join("index.html").exists(), "nothing was renamed");
+    }
+
+    #[test]
+    fn two_files_of_the_same_name_do_not_clobber_each_other() {
+        let ws = workspace();
+        let outside = workspace();
+        let first = outside.path().join("notes.txt");
+        std::fs::write(&first, "one").expect("writes");
+        let nested = outside.path().join("elsewhere");
+        std::fs::create_dir_all(&nested).expect("creates");
+        let second = nested.join("notes.txt");
+        std::fs::write(&second, "two").expect("writes");
+
+        let a = import(ws.path(), &first).expect("imports");
+        let b = import(ws.path(), &second).expect("imports");
+
+        assert_eq!(a.file_name().expect("name"), "notes");
+        assert_eq!(b.file_name().expect("name"), "notes 2");
+        assert_eq!(
+            std::fs::read_to_string(a.join("notes.txt")).expect("reads"),
+            "one",
+            "the first app survived"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_only_an_extension_is_not_born_hidden() {
+        // `.zshrc` has no stem to name an app after, and a folder starting with
+        // a dot is skipped by the registry - the app would be made and never
+        // appear.
+        let ws = workspace();
+        let outside = workspace();
+        let file = outside.path().join(".zshrc");
+        std::fs::write(&file, "export PATH").expect("writes");
+
+        let folder = import(ws.path(), &file).expect("imports");
+
+        assert_eq!(folder.file_name().expect("name"), "zshrc");
+        assert!(folder.join(".zshrc").is_file(), "the file keeps its name");
+    }
+
+    #[test]
+    fn a_file_already_in_the_workspace_is_refused_like_a_folder() {
+        // It is already part of an app. Copying it would make a second one.
+        let ws = workspace();
+        let inside = ws.path().join("Site");
+        std::fs::create_dir_all(&inside).expect("creates");
+        let file = inside.join("index.html");
         std::fs::write(&file, "<h1>hi</h1>").expect("writes");
 
         assert!(matches!(
             import(ws.path(), &file),
-            Err(AuthorError::NotAFolder(_))
-        ));
-        assert!(matches!(
-            import(ws.path(), &outside.path().join("nope")),
-            Err(AuthorError::Missing(_))
+            Err(AuthorError::AlreadyInWorkspace(_))
         ));
     }
 
