@@ -29,6 +29,30 @@ export function handover(
 }
 
 /**
+ * Which address the window's **Open** button should go to.
+ *
+ * The address the window is already showing, so that pressing Open lands where
+ * the app says it lives - the public name for a published app whose tunnel is
+ * up, the `.local` one otherwise. A button that silently went somewhere other
+ * than the address printed two lines above it is the thing being fixed.
+ *
+ * **Private is the one exception, and it is not a preference.** That level is
+ * satisfiable only on loopback: `.local` and the public name both resolve to
+ * this machine's *LAN* address, which earns no owner exemption in the gate, so
+ * either would answer 403 to the person who owns the app. There is no third
+ * address to offer, so Private keeps loopback.
+ *
+ * Invited deliberately does *not* get that treatment. Its address can refuse -
+ * the owner's own browser is only let in if it is an approved device - but
+ * being asked to pair is the product working, it is visible, and the owner can
+ * answer it. Substituting a different URL to dodge that would put the button
+ * back to opening something other than what is on screen.
+ */
+export function opens(app: App, shown: string): string {
+  return app.visibility === "private" ? app.loopback_url : shown;
+}
+
+/**
  * Whether an app is reachable away from home, and on what terms.
  *
  * The two live modes are not a performance setting. Serving a snapshot while
