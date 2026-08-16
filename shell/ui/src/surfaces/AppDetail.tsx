@@ -10,6 +10,7 @@ import { handover } from "../relay";
 import { useDevices } from "../devices";
 import { usePresence, viewerName, viewerWhen, viewerWhere } from "../presence";
 import { AppActivity } from "./Activity";
+import { Storage } from "./Storage";
 import { DangerZone } from "./DangerZone";
 import { Devices } from "./Devices";
 import { APP_TABS, APP_TAB_LABELS, type AppTab, type Surface } from "../navigation";
@@ -227,7 +228,8 @@ export function AppDetail({
         {tab === "sharing" && <Sharing app={app} />}
         {tab === "devices" && <Devices />}
         {tab === "activity" && <AppActivity app={app} />}
-        {(tab === "storage" || tab === "versions") && (
+        {tab === "storage" && <Storage app={app} />}
+        {tab === "versions" && (
           <p style={{ font: "400 14px var(--font-sans)", color: "var(--faint)" }}>
             {APP_TAB_LABELS[tab]} is not built yet.
           </p>
