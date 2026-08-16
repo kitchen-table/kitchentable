@@ -106,14 +106,24 @@ it("turns the copy off without changing where the data lives", async () => {
   });
 });
 
-it("will not offer a backup of data that is already here", () => {
-  // Under Synced there is no device copy to make, so the switch would be a
-  // control that silently does nothing. Drawn with the reason instead.
-  show({ storage: "synced" });
+it("says a synced app's copy is on, because it is", () => {
+  // This read "off" and greyed, which was a plain lie: the Mac holds every
+  // byte of a synced app. Syncing works by keeping the copy here, so the
+  // switch is on and locked rather than off and unavailable.
+  show({ storage: "synced", storage_backup: false });
 
   const toggle = screen.getByRole("switch");
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
   expect(toggle.hasAttribute("disabled")).toBe(true);
-  expect(screen.getByText(/already here/)).toBeDefined();
+  expect(screen.getByText(/a copy is always on this Mac/i)).toBeDefined();
+});
+
+it("makes the copy an ordinary choice once each device keeps its own", () => {
+  show({ storage: "per_device", storage_backup: false });
+
+  const toggle = screen.getByRole("switch");
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(toggle.hasAttribute("disabled")).toBe(false);
 });
 
 describe("the stored data", () => {

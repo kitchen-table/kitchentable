@@ -49,9 +49,10 @@ export function Storage({ app }: { app: App }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["apps"] }),
   });
 
-  // Under Synced the data is already on this machine, so there is nothing to
-  // copy and the switch has nothing to act on. Drawn as unavailable with the
-  // reason rather than as a control that silently does nothing.
+  // Whether keeping a copy here is a choice, or a consequence. Syncing works
+  // by holding the data on this machine, so under Synced the copy exists
+  // whatever anybody would prefer - and the switch says so rather than
+  // pretending to be a control.
   const backupApplies = app.storage === "per_device";
 
   return (
@@ -179,12 +180,19 @@ function ModeCard({
 }
 
 /**
- * Whether this machine keeps a copy of what each device holds.
+ * Whether this machine keeps a copy of the app's data.
  *
- * The copy is written as each change arrives rather than on a schedule, which
- * is why there is no "last backup" clock to keep honest and no question about
- * what happens while the Mac is asleep: a device that could not reach the
- * daemon simply has not been copied yet, and says so the next time it can.
+ * A separate question from where the data lives, and the two are only related
+ * in one direction: syncing works *by* keeping the copy here, so under Synced
+ * this is on and cannot be turned off. It is drawn on and locked rather than
+ * greyed and off, which is what it used to be and was a plain lie - the Mac
+ * holds every byte of a synced app, and a switch reading "off" said otherwise.
+ *
+ * Under Separate on each device it is an ordinary choice, and the copy is
+ * written as each change arrives rather than on a schedule - so there is no
+ * "last backup" clock to keep honest and no question about what happens while
+ * the Mac is asleep. A device that could not reach the daemon has simply not
+ * been copied yet, and is the next time it can.
  */
 function Backup({
   app,
@@ -193,11 +201,13 @@ function Backup({
   onToggle,
 }: {
   app: App;
+  /** Whether this is a choice here, rather than a consequence of syncing. */
   applies: boolean;
   busy: boolean;
   onToggle: () => void;
 }) {
-  const on = applies && app.storage_backup;
+  // Syncing puts the data here by definition, so the honest reading is "on".
+  const on = applies ? app.storage_backup : true;
 
   return (
     <div
@@ -210,7 +220,6 @@ function Backup({
         borderRadius: 12,
         padding: "15px 18px",
         marginBottom: 22,
-        opacity: applies ? 1 : 0.55,
       }}
     >
       <span
@@ -231,7 +240,7 @@ function Backup({
 
       <div style={{ flex: 1 }}>
         <div style={{ font: "700 13.5px var(--font-sans)", marginBottom: 2 }}>
-          Back up device data to this Mac
+          {applies ? "Back up device data to this Mac" : "A copy is kept on this Mac"}
         </div>
         <div
           style={{
@@ -241,7 +250,7 @@ function Backup({
           }}
         >
           {!applies
-            ? "Only applies when each device keeps its own copy. Right now this app's data is already here."
+            ? "On — keeping this app in sync works by holding the data here, so a copy is always on this Mac. Choose “Separate on each device” if you want that to be your choice."
             : on
               ? "On — a copy of every device's data is saved here immediately, so nothing is lost if a phone breaks or gets wiped."
               : "Off — data stays only on each device. If a phone is lost or wiped, its data goes with it."}
