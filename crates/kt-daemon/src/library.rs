@@ -182,6 +182,8 @@ impl Library {
                 entry: record.manifest.entry.clone(),
                 visibility: record.manifest.visibility,
                 relay: record.manifest.relay,
+                storage: record.manifest.storage,
+                storage_backup: record.manifest.storage_backup,
             };
 
             let slug = record.manifest.slug.clone();
@@ -305,6 +307,8 @@ mod tests {
         AppRecord::unmeasured(
             AppManifest {
                 relay: Default::default(),
+                storage: Default::default(),
+                storage_backup: true,
                 public_label: None,
                 name: name.into(),
                 slug: slug.into(),

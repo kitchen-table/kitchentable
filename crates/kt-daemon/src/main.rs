@@ -19,6 +19,7 @@ mod library;
 mod relay;
 mod rpc;
 mod socket;
+mod storage;
 mod trust;
 
 use library::Library;
@@ -93,6 +94,10 @@ async fn run() -> Result<(), StartupError> {
     registry.ensure_workspace()?;
 
     let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
+    // Each app's own key-value store, one SQLite file each. Shared between the
+    // HTTP layer, which apps write through, and the socket, which reads them
+    // back for the owner's Storage tab.
+    let stores = Arc::new(kt_store::Storage::new(paths::storage_dir(&home)));
     let library = Arc::new(Library::new());
     // Created before anything that publishes, so the watcher, the gate and the
     // pairing path all share one bus.
@@ -225,6 +230,7 @@ async fn run() -> Result<(), StartupError> {
         presence: Arc::clone(&presence),
         install_key,
         relay: Arc::clone(&relay_status),
+        stores: Arc::clone(&stores),
     });
 
     // Nobody tells us when a page stops checking in - that is the whole point
@@ -292,7 +298,11 @@ async fn run() -> Result<(), StartupError> {
         library.set_relay_identity(Some((handle, domain)));
     }
 
-    let app = kt_server::router(library, trust, presence_for_http);
+    // Each app's own data, in its own file under the state directory. One
+    // instance, shared with the socket so the Storage tab reads what the apps
+    // wrote rather than a second set of connections to the same files.
+    let app_storage: kt_server::storage::Shared = Arc::new(storage::Apps::new(Arc::clone(&stores)));
+    let app = kt_server::router_with_storage(library, trust, presence_for_http, app_storage);
 
     // Dial the relay, if this install has one and knows who it is.
     //

@@ -107,6 +107,23 @@ const MIGRATIONS: &[&str] = &[
     -- genuinely different states and a NOT NULL default would erase the first.
     ALTER TABLE apps ADD COLUMN public_label TEXT;
     "#,
+    // 7: where an app's data lives, and whether this machine keeps a copy.
+    r#"
+    -- Columns rather than keys in `extra`, for the same reason `relay` got one:
+    -- a fixed vocabulary the daemon reads on every serve, to decide whether a
+    -- page gets the syncing client or the per-device one.
+    --
+    -- 'synced' is the default because it is what every app already does: one
+    -- store, shared by whoever can open the app. This migration must not change
+    -- what any existing app means.
+    ALTER TABLE apps ADD COLUMN storage TEXT NOT NULL DEFAULT 'synced';
+
+    -- On by default. The failure it prevents - a phone breaks and takes a
+    -- year of somebody's notes with it - is worse and far less recoverable
+    -- than the one it causes, which is the owner's own Mac holding a copy of
+    -- data from their own household.
+    ALTER TABLE apps ADD COLUMN storage_backup INTEGER NOT NULL DEFAULT 1;
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

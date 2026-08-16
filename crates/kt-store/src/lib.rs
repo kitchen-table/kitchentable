@@ -7,12 +7,14 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use kt_types::{AppManifest, AppRecord, RelayMode, Visibility};
+use kt_types::{AppManifest, AppRecord, RelayMode, StorageMode, Visibility};
 use rusqlite::{params, Connection, OptionalExtension};
 
+mod app_store;
 mod migrations;
 mod trust;
 
+pub use app_store::{AppStore, Entry, Scope, Storage, DEFAULT_QUOTA_BYTES};
 pub use trust::AccessEvent;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +35,12 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("this app has used its {limit} bytes of storage")]
+    Quota { limit: i64 },
+    /// A slug that would not be a filename. The storage API resolves an app
+    /// from the `Host` header, so this is reachable from outside.
+    #[error("{0:?} is not a slug this daemon would have minted")]
+    BadSlug(String),
 }
 
 pub struct Store {
@@ -78,8 +86,8 @@ impl Store {
         let m = &record.manifest;
         let extra = serde_json::Value::Object(m.extra.clone()).to_string();
         self.lock().execute(
-            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO apps (slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label, storage, storage_backup)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(slug) DO UPDATE SET
                 name = excluded.name,
                 icon = excluded.icon,
@@ -91,6 +99,8 @@ impl Store {
                 paused = excluded.paused,
                 relay = excluded.relay,
                 public_label = excluded.public_label,
+                storage = excluded.storage,
+                storage_backup = excluded.storage_backup,
                 updated_at = strftime('%s','now')",
             params![
                 m.slug,
@@ -104,6 +114,8 @@ impl Store {
                 m.paused as i64,
                 relay_str(m.relay),
                 m.public_label,
+                storage_str(m.storage),
+                m.storage_backup as i64,
             ],
         )?;
         Ok(())
@@ -154,7 +166,7 @@ impl Store {
     pub fn list_apps(&self) -> Result<Vec<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label, storage, storage_backup
              FROM apps ORDER BY name COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], |row| Ok(row_to_record(row)))?;
@@ -168,7 +180,7 @@ impl Store {
     pub fn get_app(&self, slug: &str) -> Result<Option<AppRecord>, StoreError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label
+            "SELECT slug, name, icon, entry, visibility, version, path, extra, paused, relay, public_label, storage, storage_backup
              FROM apps WHERE slug = ?1",
         )?;
         let found = stmt
@@ -233,6 +245,10 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AppRecord, StoreError> {
             relay: relay_from_str(&row.get::<_, String>(9)?),
             // Column 11, index 10. Appended for the same reason `relay` was.
             public_label: row.get::<_, Option<String>>(10)?,
+            // Columns 12 and 13, indices 11 and 12. Appended, same reason
+            // again: every index above this line stays where it was.
+            storage: storage_from_str(&row.get::<_, String>(11)?),
+            storage_backup: row.get::<_, i64>(12)? != 0,
             extra,
         },
         row.get(6)?,
@@ -278,6 +294,24 @@ fn relay_from_str(s: &str) -> RelayMode {
     }
 }
 
+fn storage_str(mode: StorageMode) -> &'static str {
+    match mode {
+        StorageMode::Synced => "synced",
+        StorageMode::PerDevice => "per_device",
+    }
+}
+
+/// Unknown values fall back to `Synced`, which is what every app was before
+/// this column existed. The stake here is the mirror of the two above: a row
+/// this build cannot interpret must not silently split one household's shared
+/// list into a copy per phone.
+fn storage_from_str(s: &str) -> StorageMode {
+    match s {
+        "per_device" => StorageMode::PerDevice,
+        _ => StorageMode::Synced,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +320,8 @@ mod tests {
         AppRecord::unmeasured(
             AppManifest {
                 relay: RelayMode::Off,
+                storage: StorageMode::Synced,
+                storage_backup: true,
                 public_label: None,
                 name: name.into(),
                 slug: slug.into(),

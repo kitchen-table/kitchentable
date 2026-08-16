@@ -9,6 +9,7 @@ export type { KtError } from "./KtError";
 export type { RelayMode } from "./RelayMode";
 export type { RelayState } from "./RelayState";
 export type { ServingState } from "./ServingState";
+export type { StorageMode } from "./StorageMode";
 export type { SysStatus } from "./SysStatus";
 export type { Viewer } from "./Viewer";
 export type { Visibility } from "./Visibility";

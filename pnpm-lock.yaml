@@ -8,6 +8,15 @@ importers:
 
   .: {}
 
+  packages/storage-js:
+    devDependencies:
+      jsdom:
+        specifier: ^27.0.0
+        version: 27.4.0
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(jsdom@27.4.0)
+
   shell:
     devDependencies:
       '@tauri-apps/cli':

@@ -163,6 +163,40 @@ export function DeviceShapeIcon({
   );
 }
 
+/** Two arrows chasing each other: data kept in step everywhere. */
+export function SyncIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 12a8 8 0 0 1 13.7-5.7L20 8" />
+      <path d="M20 4v4h-4" />
+      <path d="M20 12a8 8 0 0 1-13.7 5.7L4 16" />
+      <path d="M4 20v-4h4" />
+    </Svg>
+  );
+}
+
+/** A screen on a stand: one device keeping its own copy. */
+export function DesktopIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <line x1="8" y1="20" x2="16" y2="20" />
+      <line x1="12" y1="16" x2="12" y2="20" />
+    </Svg>
+  );
+}
+
+/** A cloud with an arrow into it: a copy kept on this machine. */
+export function BackupIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 15a5 5 0 0 1 .9-9.9A6.5 6.5 0 0 1 18 6.5 4.5 4.5 0 0 1 19 15" />
+      <line x1="12" y1="12" x2="12" y2="21" />
+      <polyline points="8.5 17.5 12 21 15.5 17.5" />
+    </Svg>
+  );
+}
+
 /** A crescent: the appearance toggle. */
 export function MoonIcon(props: IconProps) {
   return (

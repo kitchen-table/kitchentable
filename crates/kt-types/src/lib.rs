@@ -27,8 +27,8 @@ pub mod protocol;
 pub mod status;
 
 pub use app::{
-    normalise_public_label, App, AppManifest, AppRecord, PublicLabelError, RelayMode, Urls,
-    Visibility, MAX_DNS_LABEL,
+    normalise_public_label, App, AppManifest, AppRecord, PublicLabelError, RelayMode, StorageMode,
+    Urls, Visibility, MAX_DNS_LABEL,
 };
 pub use event::{Event, Viewer};
 pub use protocol::{ErrorCode, KtError, Request, Response, PROTOCOL_VERSION};

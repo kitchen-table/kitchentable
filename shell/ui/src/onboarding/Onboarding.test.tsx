@@ -25,6 +25,8 @@ const welcomeApp: App = {
   version: 1,
   paused: false,
   relay: "off",
+  storage: "synced",
+  storage_backup: true,
     public_label: "trip",
   url: "http://welcome.local",
   fallback_url: "http://192.168.0.5/welcome",

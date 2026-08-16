@@ -23,6 +23,7 @@ pub mod live;
 pub mod pages;
 pub mod paths;
 pub mod presence;
+pub mod storage;
 
 pub use presence::Presence;
 
@@ -42,6 +43,13 @@ pub struct ServedApp {
     /// Orthogonal to `visibility`: that says who may open it, this says
     /// whether it can be asked for from outside this network at all.
     pub relay: kt_types::RelayMode,
+    /// Whether everyone shares one set of this app's data, or each device keeps
+    /// its own. Carried here because the client has to know before it decides
+    /// where to read and write, and it is the daemon that knows.
+    pub storage: kt_types::StorageMode,
+    /// Whether this machine keeps a copy of what each device holds. Only means
+    /// anything under `PerDevice`.
+    pub storage_backup: bool,
 }
 
 /// Snapshot of what is currently servable. Swapped wholesale when the registry
@@ -138,7 +146,7 @@ pub struct Redemption {
 /// Hand-rolled because axum 0.8 moved its own out to axum-extra, and this needs
 /// no proxy handling: the daemon is always the origin server, so
 /// `X-Forwarded-Host` is not something to trust.
-struct Host(String);
+pub(crate) struct Host(pub(crate) String);
 
 impl<S: Send + Sync> FromRequestParts<S> for Host {
     type Rejection = std::convert::Infallible;
@@ -171,7 +179,7 @@ pub struct ArrivedByRelay;
 /// Absent address rather than fatal if it is missing: the only thing it grants
 /// is the owner's own-machine exemption, so losing it can refuse but never
 /// over-permit.
-struct Peer {
+pub(crate) struct Peer {
     address: Option<std::net::IpAddr>,
     /// True when this came down the relay tunnel.
     relayed: bool,
@@ -242,30 +250,61 @@ pub struct ServerState<S: AppSource, T: TrustSource> {
     /// Who currently has something open. Shared with the daemon, which is what
     /// lets the owner's window show it.
     pub presence: Arc<Presence>,
+    /// Where apps keep their data, when this daemon serves any.
+    ///
+    /// Optional because serving files needs no store, and because every test
+    /// here builds a router without one. A `dyn` rather than another type
+    /// parameter for the same reason: a storage call is a SQLite query, so the
+    /// virtual dispatch in front of it costs nothing measurable, and threading
+    /// a third generic through every handler would not have bought anything.
+    pub storage: Option<storage::Shared>,
 }
 
 // Written out rather than derived: `#[derive(Clone)]` would demand `S: Clone`
-// and `T: Clone`, which is not true and not needed - both fields are already
-// behind an Arc, so cloning is two refcount bumps.
+// and `T: Clone`, which is not true and not needed - every field is already
+// behind an Arc, so cloning is a handful of refcount bumps.
 impl<S: AppSource, T: TrustSource> Clone for ServerState<S, T> {
     fn clone(&self) -> Self {
         Self {
             apps: Arc::clone(&self.apps),
             trust: Arc::clone(&self.trust),
             presence: Arc::clone(&self.presence),
+            storage: self.storage.clone(),
         }
     }
 }
 
+/// A router that serves files but keeps nothing. What an embedding that only
+/// wants serving gets, and what every test in this crate builds.
 pub fn router<S: AppSource, T: TrustSource>(
     apps: Arc<S>,
     trust: Arc<T>,
     presence: Arc<Presence>,
 ) -> Router {
+    build(apps, trust, presence, None)
+}
+
+/// The same router, with somewhere for apps to keep their data.
+pub fn router_with_storage<S: AppSource, T: TrustSource>(
+    apps: Arc<S>,
+    trust: Arc<T>,
+    presence: Arc<Presence>,
+    store: storage::Shared,
+) -> Router {
+    build(apps, trust, presence, Some(store))
+}
+
+fn build<S: AppSource, T: TrustSource>(
+    apps: Arc<S>,
+    trust: Arc<T>,
+    presence: Arc<Presence>,
+    store: Option<storage::Shared>,
+) -> Router {
     let state = ServerState {
         apps,
         trust,
         presence,
+        storage: store,
     };
 
     Router::new()
@@ -279,6 +318,18 @@ pub fn router<S: AppSource, T: TrustSource>(
         .route(
             &format!("{}/gone", live::PREFIX),
             get(gone::<S, T>).post(gone::<S, T>),
+        )
+        // An app's own data. Static segments again, so they win against the
+        // `/{slug}` routes. The key is a wildcard because keys are the app's to
+        // choose and `day:1/notes` is a reasonable one.
+        .route(storage::SCRIPT_PATH, get(storage::script))
+        .route(storage::CONFIG_PATH, get(storage::config::<S, T>))
+        .route(storage::PREFIX, get(storage::list::<S, T>))
+        .route(
+            &format!("{}/{{*key}}", storage::PREFIX),
+            get(storage::read::<S, T>)
+                .put(storage::write::<S, T>)
+                .delete(storage::remove::<S, T>),
         )
         // Invite redemption lives on the app's own hostname so a shared link
         // never bounces the viewer to another domain.
@@ -527,7 +578,7 @@ async fn guarded<S: AppSource, T: TrustSource>(
 }
 
 /// The app that owns this origin, if any.
-fn app_for_host<S: AppSource>(source: &S, host: &str) -> Option<ServedApp> {
+pub(crate) fn app_for_host<S: AppSource>(source: &S, host: &str) -> Option<ServedApp> {
     source.get_by_hostname(&normalise_host(host))
 }
 
