@@ -182,6 +182,8 @@ impl Library {
                 entry: record.manifest.entry.clone(),
                 visibility: record.manifest.visibility,
                 relay: record.manifest.relay,
+                storage: record.manifest.storage,
+                storage_backup: record.manifest.storage_backup,
             };
 
             let slug = record.manifest.slug.clone();

@@ -1,0 +1,7 @@
+{
+  "name": "Trip Planner",
+  "slug": "trip-planner",
+  "entry": "index.html",
+  "visibility": "private",
+  "version": 1
+}

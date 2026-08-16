@@ -57,6 +57,8 @@ impl Fixture {
             apps: vec![
                 ServedApp {
                     relay: Default::default(),
+                    storage: Default::default(),
+                    storage_backup: true,
                     slug: "trip".into(),
                     name: "Trip Planner".into(),
                     root: root.canonicalize().expect("canonicalises"),
@@ -66,6 +68,8 @@ impl Fixture {
                 },
                 ServedApp {
                     relay: Default::default(),
+                    storage: Default::default(),
+                    storage_backup: true,
                     slug: "chores".into(),
                     name: "Chores Rota".into(),
                     root: chores.canonicalize().expect("canonicalises"),

@@ -116,9 +116,52 @@ it("will not offer a backup of data that is already here", () => {
   expect(screen.getByText(/already here/)).toBeDefined();
 });
 
-it("does not draw an empty table it has not read", () => {
-  // An empty table is a claim that the app has stored nothing. Until this is
-  // reading the store, that claim would be a guess.
-  show();
-  expect(screen.getByText(/not built yet/)).toBeDefined();
+describe("the stored data", () => {
+  it("does not claim the store is empty while it is still reading", () => {
+    // "Nothing stored yet" and "we have not asked" are different claims, and
+    // this is the panel an owner checks to see what an app is holding.
+    call.mockImplementation(() => new Promise(() => {}));
+    show();
+
+    expect(screen.getByText(/Reading the store/)).toBeDefined();
+    expect(screen.queryByText(/Nothing stored yet/)).toBeNull();
+  });
+
+  it("shows the shared store's keys, values and types", async () => {
+    call.mockResolvedValue({
+      bytes: 42,
+      entries: [
+        { key: "items", value: '["passports"]', kind: "json", updated_at: 0 },
+      ],
+    });
+    show();
+
+    await waitFor(() => expect(screen.getByText("items")).toBeDefined());
+    expect(screen.getByText('["passports"]')).toBeDefined();
+    expect(screen.getByText("json")).toBeDefined();
+    expect(screen.getByText(/SQLite · isolated · 42 B/)).toBeDefined();
+  });
+
+  it("counts what each device holds without showing what is in it", async () => {
+    // The owner's window is not a reason to build a way to read somebody's
+    // private notes, and the daemon does not send them.
+    call.mockResolvedValue({
+      bytes: 10,
+      devices: [{ device: "d1", name: "Priya's iPhone", keys: 2 }],
+    });
+    show({ storage: "per_device" });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Per-viewer" }));
+
+    await waitFor(() => expect(screen.getByText("Priya's iPhone")).toBeDefined());
+    expect(screen.getByText("2 keys")).toBeDefined();
+    expect(screen.getByText("VIEWER")).toBeDefined();
+  });
+
+  it("says the daemon did not answer rather than showing an empty store", async () => {
+    call.mockRejectedValue(new Error("gone"));
+    show();
+
+    await waitFor(() => expect(screen.getByText(/did not answer/)).toBeDefined());
+  });
 });

@@ -1,6 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { App, StorageMode } from "../generated";
 import { call } from "../daemon";
+import { size } from "../activity";
 import { SyncIcon, DesktopIcon, BackupIcon } from "../icons";
 
 /**
@@ -284,30 +286,223 @@ function Backup({
   );
 }
 
+/** What one `storage.query` answers with, in either of its two shapes. */
+interface Stored {
+  bytes: number;
+  entries?: { key: string; value: string; kind: string; updated_at: number }[];
+  devices?: { device: string; name: string; keys: number }[];
+}
+
 /**
  * What is actually in the store.
  *
- * Not built yet, and drawn as such rather than as an empty table: an empty
- * table is a claim that the app has stored nothing, and until this is reading
- * the store that claim would be a guess.
+ * Two shapes of the same table. Per-app is the shared store's keys and values;
+ * per-viewer is a row per device with how much each holds - and deliberately
+ * not what is in it. The owner's window is not a reason to build a way to read
+ * somebody's private notes, and the daemon does not send them.
  */
 function StoredData({ app }: { app: App }) {
+  const [scope, setScope] = useState<"app" | "devices">("app");
+  const stored = useQuery({
+    queryKey: ["storage", app.slug, scope],
+    queryFn: () => call<Stored>("storage.query", { slug: app.slug, scope }),
+    retry: false,
+  });
+
+  const columns = scope === "app" ? "minmax(0,1fr) minmax(0,1.4fr) 70px" : "minmax(0,1fr) minmax(0,1.4fr) 70px";
+  const headings = scope === "app" ? ["KEY", "VALUE", "TYPE"] : ["VIEWER", "DATA", "KEYS"];
+
+  return (
+    <>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 16,
+        }}
+      >
+        <div
+          role="tablist"
+          style={{
+            display: "inline-flex",
+            background: "var(--raised)",
+            border: "1px solid var(--border)",
+            borderRadius: 9,
+            padding: 3,
+          }}
+        >
+          {(["app", "devices"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={scope === value}
+              onClick={() => setScope(value)}
+              style={{
+                padding: "7px 14px",
+                borderRadius: 7,
+                border: "none",
+                cursor: "pointer",
+                font: "600 12.5px var(--font-sans)",
+                background: scope === value ? "var(--paper)" : "transparent",
+                color: scope === value ? "var(--ink)" : "var(--muted)",
+              }}
+            >
+              {value === "app" ? "Per-app" : "Per-viewer"}
+            </button>
+          ))}
+        </div>
+        <div style={{ font: "400 12px var(--font-mono)", color: "var(--muted)" }}>
+          SQLite · isolated · {stored.data ? size(stored.data.bytes) : "…"}
+        </div>
+      </div>
+
+      <div
+        style={{
+          background: "var(--paper)",
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: columns,
+            gap: 16,
+            padding: "12px 18px",
+            background: "var(--raised)",
+            font: "600 10.5px var(--font-mono)",
+            color: "var(--muted)",
+            letterSpacing: "0.05em",
+          }}
+        >
+          {headings.map((heading) => (
+            <span key={heading}>{heading}</span>
+          ))}
+        </div>
+
+        {stored.isPending ? (
+          <Note>Reading the store…</Note>
+        ) : stored.isError ? (
+          <Note>The daemon did not answer. This will fill in when it does.</Note>
+        ) : scope === "app" ? (
+          (stored.data?.entries ?? []).length === 0 ? (
+            <Note>
+              Nothing stored yet. {app.name} writes here by calling{" "}
+              <Mono>storage.set</Mono>.
+            </Note>
+          ) : (
+            stored.data?.entries?.map((entry) => (
+              <Line key={entry.key} columns={columns}>
+                <Cell>{entry.key}</Cell>
+                <Cell accent>{entry.value}</Cell>
+                <Small>{entry.kind}</Small>
+              </Line>
+            ))
+          )
+        ) : (stored.data?.devices ?? []).length === 0 ? (
+          <Note>
+            No device has stored anything here. Devices keep their own data only
+            when this app is set to keep it separate.
+          </Note>
+        ) : (
+          stored.data?.devices?.map((row) => (
+            <Line key={row.device} columns={columns}>
+              <Cell>{row.name}</Cell>
+              {/* What each device holds, not what is in it. */}
+              <Cell accent>kept on this device</Cell>
+              <Small>
+                {row.keys} {row.keys === 1 ? "key" : "keys"}
+              </Small>
+            </Line>
+          ))
+        )}
+      </div>
+
+      <div
+        style={{
+          marginTop: 14,
+          font: "400 12px/1.5 var(--font-sans)",
+          color: "var(--muted)",
+        }}
+      >
+        Exposed to the app frontend as{" "}
+        <Mono>storage.get / set / list / delete</Mono> plus matching REST
+        endpoints. No backend code required.
+      </div>
+    </>
+  );
+}
+
+function Line({
+  columns,
+  children,
+}: {
+  columns: string;
+  children: React.ReactNode;
+}) {
   return (
     <div
       style={{
-        background: "var(--paper)",
-        border: "1px solid var(--border)",
-        borderRadius: 12,
+        display: "grid",
+        gridTemplateColumns: columns,
+        gap: 16,
+        padding: "13px 18px",
+        borderTop: "1px solid var(--divider)",
+        alignItems: "center",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Cell({ children, accent }: { children: React.ReactNode; accent?: boolean }) {
+  return (
+    <span
+      style={{
+        font: `${accent ? 400 : 500} 12.5px var(--font-mono)`,
+        color: accent ? "var(--accent)" : "var(--ink)",
+        minWidth: 0,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function Small({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{ font: "500 10.5px var(--font-mono)", color: "var(--muted)" }}>
+      {children}
+    </span>
+  );
+}
+
+function Mono({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{ font: "400 12px var(--font-mono)", color: "var(--ink2)" }}>
+      {children}
+    </span>
+  );
+}
+
+function Note({ children }: { children: React.ReactNode }) {
+  return (
+    <p
+      style={{
+        margin: 0,
         padding: "16px 18px",
         font: "400 13px var(--font-sans)",
         color: "var(--ink3)",
       }}
     >
-      Reading {app.name}'s stored data is not built yet. Apps write to it with{" "}
-      <span style={{ font: "400 12.5px var(--font-mono)", color: "var(--ink2)" }}>
-        storage.get / set / list / delete
-      </span>
-      , and no backend code.
-    </div>
+      {children}
+    </p>
   );
 }

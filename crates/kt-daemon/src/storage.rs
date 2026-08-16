@@ -4,20 +4,21 @@
 //! SQLite and kt-store deliberately knows nothing about requests, so somebody
 //! has to hold both, and the daemon is where every other pair of those meet.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use kt_server::storage::{StorageEntry, StorageFault, StorageSource};
 use kt_store::{Scope, Storage, StoreError};
 
 pub struct Apps {
-    storage: Storage,
+    storage: Arc<Storage>,
 }
 
 impl Apps {
-    pub fn new(root: PathBuf) -> Self {
-        Self {
-            storage: Storage::new(root),
-        }
+    /// Shares one [`Storage`] with the socket, which reads the same stores to
+    /// draw the owner's Storage tab. Two would be two sets of open connections
+    /// to the same files.
+    pub fn new(storage: Arc<Storage>) -> Self {
+        Self { storage }
     }
 }
 

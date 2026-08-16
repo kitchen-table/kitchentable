@@ -43,6 +43,13 @@ pub struct ServedApp {
     /// Orthogonal to `visibility`: that says who may open it, this says
     /// whether it can be asked for from outside this network at all.
     pub relay: kt_types::RelayMode,
+    /// Whether everyone shares one set of this app's data, or each device keeps
+    /// its own. Carried here because the client has to know before it decides
+    /// where to read and write, and it is the daemon that knows.
+    pub storage: kt_types::StorageMode,
+    /// Whether this machine keeps a copy of what each device holds. Only means
+    /// anything under `PerDevice`.
+    pub storage_backup: bool,
 }
 
 /// Snapshot of what is currently servable. Swapped wholesale when the registry
@@ -316,6 +323,7 @@ fn build<S: AppSource, T: TrustSource>(
         // `/{slug}` routes. The key is a wildcard because keys are the app's to
         // choose and `day:1/notes` is a reasonable one.
         .route(storage::SCRIPT_PATH, get(storage::script))
+        .route(storage::CONFIG_PATH, get(storage::config::<S, T>))
         .route(storage::PREFIX, get(storage::list::<S, T>))
         .route(
             &format!("{}/{{*key}}", storage::PREFIX),

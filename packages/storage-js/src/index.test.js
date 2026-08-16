@@ -1,15 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { forget, storage, syncing } from "./index.js";
+import { forget, storage, syncing, where } from "./index.js";
 
-/** Answer every request with one status and body. */
-function answering(status, body = "") {
-  return vi.fn(async () => ({
-    status,
-    ok: status >= 200 && status < 300,
-    json: async () => JSON.parse(body || "null"),
-    text: async () => body,
-  }));
+/**
+ * A daemon that answers the config endpoint one way and everything else
+ * another, recording every call so a test can assert what reached it.
+ */
+function daemon({ config, storeStatus = 204, body = "" } = {}) {
+  const calls = [];
+  const fetch = vi.fn(async (path, init = {}) => {
+    calls.push({ path, method: init.method ?? "GET", body: init.body, headers: init.headers });
+    if (path === "/__kt/storage.json") {
+      if (config === "missing") return { ok: false, status: 404 };
+      if (config === "offline") throw new TypeError("Failed to fetch");
+      return { ok: true, status: 200, json: async () => config };
+    }
+    return {
+      ok: storeStatus >= 200 && storeStatus < 300,
+      status: storeStatus,
+      json: async () => JSON.parse(body || "null"),
+      text: async () => body,
+    };
+  });
+  vi.stubGlobal("fetch", fetch);
+  return { fetch, calls, to: (p) => calls.filter((c) => c.path.startsWith(p)) };
 }
+
+const SYNCED = { mode: "synced", backup: false, device: true };
+const PER_DEVICE = { mode: "per_device", backup: true, device: true };
 
 beforeEach(() => {
   forget();
@@ -17,100 +34,111 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("talking to the daemon", () => {
-  it("writes to the app's own store, with the header a forged write cannot carry", async () => {
-    const fetch = answering(204);
-    vi.stubGlobal("fetch", fetch);
+describe("keep in sync everywhere", () => {
+  it("reads and writes the daemon's shared store", async () => {
+    const { calls } = daemon({ config: SYNCED });
 
     await storage().set("items", ["passports"]);
 
-    const [path, init] = fetch.mock.calls[0];
-    expect(path).toBe("/__kt/storage/items");
-    expect(init.method).toBe("PUT");
-    expect(init.headers["x-kitchen-table"]).toBe("1");
-    expect(init.body).toBe('["passports"]');
+    const write = calls.find((c) => c.method === "PUT");
+    expect(write.path).toBe("/__kt/storage/items");
+    expect(write.body).toBe('["passports"]');
+    expect(write.headers["x-kitchen-table"]).toBe("1");
+    // Nothing on the device: the daemon is the store.
+    expect(localStorage.length).toBe(0);
     expect(syncing()).toBe(true);
   });
 
-  it("asks for the personal store only when told to", async () => {
-    const fetch = answering(204);
-    vi.stubGlobal("fetch", fetch);
+  it("asks for a personal corner of a shared app when told to", async () => {
+    const { to } = daemon({ config: SYNCED });
 
-    await storage().set("a", 1);
-    await storage({ personal: true }).set("b", 2);
+    await storage({ personal: true }).set("notes", "mine");
 
-    expect(fetch.mock.calls[0][0]).toBe("/__kt/storage/a");
-    expect(fetch.mock.calls[1][0]).toBe("/__kt/storage/b?personal=1");
-  });
-
-  it("tells a key that was never set from one holding null", async () => {
-    vi.stubGlobal("fetch", answering(404));
-    // 404 is also what "no storage here" looks like, so this asserts the
-    // fallback answers rather than the call throwing.
-    await expect(storage().get("never")).resolves.toBeUndefined();
+    expect(to("/__kt/storage/notes")[0].path).toContain("personal=1");
   });
 
   it("passes a refusal through rather than answering from the device", async () => {
     // A 403 is the gate saying this viewer may not have the app. Falling back
     // would hand them a private local copy of something they were refused.
-    vi.stubGlobal("fetch", answering(403, "Not available to this device."));
+    daemon({ config: SYNCED, storeStatus: 403, body: "Not available to this device." });
 
     await expect(storage().get("items")).rejects.toThrow(/Not available/);
     expect(localStorage.length).toBe(0);
   });
+
+  it("tells a key that was never set from one holding null", async () => {
+    daemon({ config: SYNCED, storeStatus: 404 });
+    await expect(storage().get("never")).resolves.toBeUndefined();
+  });
 });
 
-describe("when Kitchen Table is not keeping this app's data", () => {
-  it("falls back to the device when there is no daemon at all", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new TypeError("Failed to fetch");
-      }),
-    );
+describe("separate on each device", () => {
+  it("keeps the data on the device, so it works with the Mac asleep", async () => {
+    const { to } = daemon({ config: PER_DEVICE });
+    const store = storage();
 
-    await storage().set("items", ["socks"]);
-    expect(await storage().get("items")).toEqual(["socks"]);
+    await store.set("workouts", [{ day: "mon" }]);
+
+    // Readable without the daemon answering anything.
+    expect(await store.get("workouts")).toEqual([{ day: "mon" }]);
+    expect(localStorage.length).toBe(1);
+    expect(to("/__kt/storage/workouts").every((c) => c.method !== "GET")).toBe(true);
     expect(syncing()).toBe(false);
   });
 
-  it("falls back where every app shares one origin", async () => {
-    // The `<ip>/<slug>/` route. The daemon refuses because it cannot keep one
-    // app's data from another's there, and the app carries on unsynced rather
-    // than breaking - which is the route Android most often needs.
-    vi.stubGlobal("fetch", answering(400, "Storage needs this app's own address."));
+  it("copies each write to the Mac when backup is on", async () => {
+    const { to } = daemon({ config: PER_DEVICE });
 
-    await storage().set("items", ["socks"]);
-    expect(await storage().get("items")).toEqual(["socks"]);
-    expect(syncing()).toBe(false);
+    await storage().set("workouts", [1]);
+
+    const copy = to("/__kt/storage/workouts").find((c) => c.method === "PUT");
+    // Under the device's own scope, so one phone's copy is never another's.
+    expect(copy.path).toContain("personal=1");
+    expect(copy.body).toBe("[1]");
   });
 
-  it("keeps the shared and personal stores apart on the device too", async () => {
-    vi.stubGlobal("fetch", answering(404));
+  it("sends nothing to the Mac when backup is off", async () => {
+    const { to } = daemon({ config: { mode: "per_device", backup: false, device: true } });
 
-    await storage().set("notes", "ours");
-    await storage({ personal: true }).set("notes", "mine");
+    await storage().set("workouts", [1]);
 
-    expect(await storage().get("notes")).toBe("ours");
-    expect(await storage({ personal: true }).get("notes")).toBe("mine");
+    expect(to("/__kt/storage/")).toHaveLength(0);
   });
 
-  it("does not let two apps on one origin share a local store", async () => {
-    // Same collision the daemon refuses to paper over, so this does not either.
-    vi.stubGlobal("fetch", answering(404));
-    const at = (path) => {
-      window.history.replaceState({}, "", path);
-    };
+  it("sends nothing when there is no device to attribute a copy to", async () => {
+    // A Household app pairs nobody. A copy that cannot be told from anyone
+    // else's is worse than no copy: it is somebody's private data in a pile.
+    const { to } = daemon({ config: { mode: "per_device", backup: true, device: false } });
 
-    at("/packing-list/");
-    await storage().set("items", ["ours"]);
+    await storage().set("workouts", [1]);
 
-    at("/chores-rota/");
-    expect(await storage().get("items")).toBeUndefined();
+    expect(to("/__kt/storage/")).toHaveLength(0);
   });
 
-  it("lists by prefix, in key order", async () => {
-    vi.stubGlobal("fetch", answering(404));
+  it("does not fail the app's write when the copy fails", async () => {
+    // The device is the store and the write already succeeded. A spare key
+    // that could not be cut is not a reason to say the door did not lock.
+    const { fetch } = daemon({ config: PER_DEVICE, storeStatus: 500, body: "boom" });
+    const store = storage();
+
+    await expect(store.set("workouts", [1])).resolves.toBeUndefined();
+    expect(await store.get("workouts")).toEqual([1]);
+    expect(fetch).toHaveBeenCalled();
+  });
+
+  it("deletes on the device and asks the Mac to forget its copy", async () => {
+    const { to } = daemon({ config: PER_DEVICE });
+    const store = storage();
+
+    await store.set("workouts", [1]);
+    await store.delete("workouts");
+
+    expect(await store.get("workouts")).toBeUndefined();
+    expect(to("/__kt/storage/workouts").some((c) => c.method === "DELETE")).toBe(true);
+  });
+
+  it("lists from the device, by prefix and in key order", async () => {
+    daemon({ config: PER_DEVICE });
     const store = storage();
 
     await store.set("day:2", "b");
@@ -122,30 +150,55 @@ describe("when Kitchen Table is not keeping this app's data", () => {
       { key: "day:2", value: "b" },
     ]);
   });
+});
 
-  it("deletes", async () => {
-    vi.stubGlobal("fetch", answering(404));
+describe("no Kitchen Table at all", () => {
+  it("works from a plain web server", async () => {
+    daemon({ config: "offline" });
     const store = storage();
 
-    await store.set("k", 1);
-    await store.delete("k");
-    expect(await store.get("k")).toBeUndefined();
+    await store.set("items", ["socks"]);
+    expect(await store.get("items")).toEqual(["socks"]);
+    expect(syncing()).toBe(false);
   });
 
-  it("does not ask twice once it knows", async () => {
-    const fetch = answering(404);
-    vi.stubGlobal("fetch", fetch);
+  it("works where every app shares one origin", async () => {
+    // The `<ip>/<slug>/` route, which is the one Android often needs. The
+    // daemon refuses because it cannot keep one app's data from another's
+    // there, and the app carries on unsynced rather than breaking.
+    daemon({ config: "missing" });
     const store = storage();
 
-    await store.set("a", 1);
-    await store.set("b", 2);
-    await store.get("a");
+    await store.set("items", ["socks"]);
+    expect(await store.get("items")).toEqual(["socks"]);
+  });
 
-    // Only the first call reaches the network; after that the answer is known.
-    expect(fetch).toHaveBeenCalledTimes(1);
+  it("does not let two apps on one origin share a local store", async () => {
+    daemon({ config: "missing" });
+    const at = (path) => window.history.replaceState({}, "", path);
+
+    at("/packing-list/");
+    await storage().set("items", ["ours"]);
+
+    at("/chores-rota/");
+    expect(await storage().get("items")).toBeUndefined();
   });
 });
 
-it("says nothing about syncing until something has been asked", () => {
+it("asks what kind of store this is exactly once", async () => {
+  const { to } = daemon({ config: SYNCED });
+  const store = storage();
+
+  await store.set("a", 1);
+  await store.set("b", 2);
+  await store.get("a");
+
+  expect(to("/__kt/storage.json")).toHaveLength(1);
+});
+
+it("says nothing about syncing until something has been asked", async () => {
   expect(syncing()).toBeNull();
+  daemon({ config: SYNCED });
+  await where();
+  expect(syncing()).toBe(true);
 });

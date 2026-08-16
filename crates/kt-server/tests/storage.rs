@@ -102,6 +102,8 @@ impl Apps {
             visibility,
             paused: false,
             relay: Default::default(),
+            storage: Default::default(),
+            storage_backup: true,
         };
         Self {
             apps: vec![app("trip"), app("chores")],
@@ -384,6 +386,43 @@ async fn a_list_is_narrowed_by_prefix() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("day:1"), "{body}");
     assert!(!body.contains("budget"), "{body}");
+}
+
+#[tokio::test]
+async fn the_client_is_told_which_kind_of_store_this_is() {
+    // The client cannot work this out and must not guess: under per-device it
+    // keeps the data on the device, and guessing "synced" would put one
+    // person's private notes into everybody's shared store.
+    let mut apps = public();
+    for app in &mut apps.apps {
+        app.storage = kt_types::StorageMode::PerDevice;
+        app.storage_backup = false;
+    }
+
+    let (status, body) = send(
+        Arc::new(Memory::default()),
+        apps,
+        Call::get("/__kt/storage.json"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(r#""mode":"per_device""#), "{body}");
+    assert!(body.contains(r#""backup":false"#), "{body}");
+}
+
+#[tokio::test]
+async fn the_kind_of_store_is_not_told_to_a_viewer_who_may_not_open_the_app() {
+    // A small thing to leak, but still a fact about somebody's app, and there
+    // is no reason for it to be looser than the data it describes.
+    let (status, _) = send(
+        Arc::new(Memory::default()),
+        Apps::new(kt_types::Visibility::Private),
+        Call::get("/__kt/storage.json"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

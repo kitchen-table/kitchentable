@@ -236,6 +236,9 @@ mod tests {
             presence: std::sync::Arc::new(kt_server::Presence::new()),
             install_key: None,
             relay: Arc::new(crate::relay::RelayStatus::new()),
+            stores: Arc::new(kt_store::Storage::new(
+                std::env::temp_dir().join("kt-socket-stores"),
+            )),
             rescan: std::sync::Arc::new(|| {}),
         })
     }

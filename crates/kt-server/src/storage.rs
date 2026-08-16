@@ -37,6 +37,59 @@ pub const PREFIX: &str = "/__kt/storage";
 /// Where an app loads the client from.
 pub const SCRIPT_PATH: &str = "/__kt/storage.js";
 
+/// Where the client asks what kind of store this app has.
+///
+/// A separate path rather than a reserved key, because a key called `_config`
+/// is a key an app could legitimately want, and because this answer is about
+/// the app rather than in it.
+pub const CONFIG_PATH: &str = "/__kt/storage.json";
+
+/// What kind of store this app has, as the client needs to know it.
+///
+/// The client cannot work this out for itself and must not guess: under
+/// `per_device` it keeps the data on the device, and guessing `synced` would
+/// put one person's private notes into everybody's shared store.
+pub(crate) async fn config<S: AppSource, T: TrustSource>(
+    State(state): State<ServerState<S, T>>,
+    host: Host,
+    headers: HeaderMap,
+    peer: Peer,
+) -> Response {
+    if state.storage.is_none() {
+        return unavailable();
+    }
+    // Deliberately the same checks as a read. Which mode an app is in is a
+    // small thing to leak, but it is still a fact about somebody's app, and
+    // there is no reason for the answer to be looser than the data.
+    let Some(app) = app_for_host(&*state.apps, &host.0) else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "Storage needs this app's own address.",
+        );
+    };
+    let device = state.trust.device_for(&headers);
+    let ctx = peer.context(state.trust.as_ref());
+    if !matches!(
+        gate::gate(app.visibility, app.paused, app.relay, device.as_ref(), &ctx),
+        gate::Gated::Serve
+    ) {
+        return refuse(StatusCode::FORBIDDEN, "Not available to this device.");
+    }
+
+    let mode = match app.storage {
+        kt_types::StorageMode::Synced => "synced",
+        kt_types::StorageMode::PerDevice => "per_device",
+    };
+    json(format!(
+        r#"{{"mode":"{mode}","backup":{},"device":{}}}"#,
+        app.storage_backup,
+        // Whether a copy can be attributed to anybody. Without a device there
+        // is nothing to key one on, so the client keeps its data and does not
+        // send it anywhere it could not be told apart later.
+        device.is_some()
+    ))
+}
+
 /// The client itself, compiled in from the package it is developed and tested
 /// in rather than kept as a second copy here.
 ///

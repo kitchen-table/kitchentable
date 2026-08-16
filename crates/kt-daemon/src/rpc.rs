@@ -40,6 +40,9 @@ pub struct Context {
     /// Whether the tunnel is up right now. Written by the relay task, read
     /// here, so `sys.status` reports the connection rather than the intention.
     pub relay: Arc<crate::relay::RelayStatus>,
+    /// Each app's own data. The same instance the HTTP layer writes through,
+    /// so the Storage tab shows what the apps actually stored.
+    pub stores: Arc<kt_store::Storage>,
 }
 
 /// The daemon's event bus.
@@ -261,6 +264,60 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
                 "storage": raw,
                 "backup": backup,
             }))
+        }
+
+        // What is actually in an app's store, for the owner's Storage tab.
+        //
+        // Two shapes from one call, because the tab shows two: the shared
+        // store's keys and values, or a row per device with how much each
+        // holds. Reading one device's actual keys is deliberately not offered
+        // here - the tab does not show them, and an owner's window is not a
+        // reason to build a way to read somebody's private notes.
+        "storage.query" => {
+            let slug = string_param(request, "slug")?;
+            ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+            let store = ctx.stores.app(&slug).map_err(store_error)?;
+
+            let per_device = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("scope"))
+                .and_then(|v| v.as_str())
+                == Some("devices");
+
+            let bytes = store.bytes().map_err(store_error)?;
+            if per_device {
+                let devices = store.device_scopes().map_err(store_error)?;
+                let rows: Vec<_> = devices
+                    .into_iter()
+                    .map(|(id, keys)| {
+                        // The owner recognises a name, not a base64 id. An
+                        // unknown one is left as the id rather than invented.
+                        let name = DeviceId::parse(&id)
+                            .and_then(|parsed| ctx.store.get_device(&parsed).ok().flatten())
+                            .map(|d| d.name)
+                            .unwrap_or_else(|| id.clone());
+                        serde_json::json!({ "device": id, "name": name, "keys": keys })
+                    })
+                    .collect();
+                json(&serde_json::json!({ "bytes": bytes, "devices": rows }))
+            } else {
+                let entries = store
+                    .list(&kt_store::Scope::Shared, "")
+                    .map_err(store_error)?;
+                let rows: Vec<_> = entries
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key,
+                            "value": e.value,
+                            "kind": value_kind(&e.value),
+                            "updated_at": e.updated_at,
+                        })
+                    })
+                    .collect();
+                json(&serde_json::json!({ "bytes": bytes, "entries": rows }))
+            }
         }
 
         // Rename the app's public address, without touching anything local.
@@ -649,6 +706,24 @@ fn parse_relay_mode(raw: &str) -> Result<kt_types::RelayMode, KtError> {
 /// visibility is: `app.json` is the source of truth and the watcher picks it
 /// up. A value that lived only in the database would disagree with the folder
 /// the moment anybody edited it.
+/// What kind of JSON a stored value is, for the tab's third column.
+///
+/// Read off the first character rather than parsed. The store keeps values as
+/// the app sent them and never interprets them; parsing here to print one word
+/// would be a second opinion about somebody's data, and a slow one on a list of
+/// five hundred rows.
+fn value_kind(value: &str) -> &'static str {
+    match value.trim_start().chars().next() {
+        Some('{') => "json",
+        Some('[') => "json",
+        Some('"') => "string",
+        Some('t') | Some('f') => "boolean",
+        Some('n') => "null",
+        Some(c) if c.is_ascii_digit() || c == '-' => "number",
+        _ => "unknown",
+    }
+}
+
 /// Write where an app's data lives, and whether this machine keeps a copy.
 ///
 /// Both in one call because the window sets them from one panel and they are
@@ -959,7 +1034,23 @@ mod tests {
             presence: std::sync::Arc::new(kt_server::Presence::new()),
             install_key: None,
             relay: Arc::new(crate::relay::RelayStatus::new()),
+            stores: Arc::new(kt_store::Storage::new(scratch_stores())),
         }
+    }
+
+    /// A store directory of its own per context.
+    ///
+    /// One shared path had these tests writing into each other's stores, which
+    /// passed when the module ran alone and failed when the whole crate ran -
+    /// the worst shape a flake comes in.
+    fn scratch_stores() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "kt-rpc-stores-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     /// A context whose app has a real folder and a real `app.json`.
@@ -1170,6 +1261,83 @@ mod tests {
             after_first.contains("\"storage_backup\": false"),
             "{after_first}"
         );
+    }
+
+    #[test]
+    fn the_shared_store_is_reported_with_a_kind_per_value() {
+        let (ctx, _dir) = context_on_disk();
+        let store = ctx.stores.app("trip-planner").expect("opens");
+        store
+            .set(&kt_store::Scope::Shared, "items", r#"["passports"]"#)
+            .expect("writes");
+        store
+            .set(&kt_store::Scope::Shared, "budget", "2400")
+            .expect("writes");
+
+        let ResponsePayload::Result(v) = dispatch(
+            &ctx,
+            &request(
+                "storage.query",
+                Some(serde_json::json!({ "slug": "trip-planner" })),
+            ),
+        ) else {
+            panic!("querying should succeed");
+        };
+
+        let entries = v["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2);
+        // Ordered by key, so a list does not reshuffle itself between reads.
+        assert_eq!(entries[0]["key"], "budget");
+        assert_eq!(entries[0]["kind"], "number");
+        assert_eq!(entries[1]["kind"], "json");
+        assert!(v["bytes"].as_i64().expect("bytes") > 0);
+    }
+
+    #[test]
+    fn the_per_device_view_counts_keys_and_never_shows_their_contents() {
+        // The tab shows how much each device holds, not what is in it. An
+        // owner's window is not a reason to build a way to read somebody's
+        // private notes.
+        let (ctx, _dir) = context_on_disk();
+        let store = ctx.stores.app("trip-planner").expect("opens");
+        store
+            .set(
+                &kt_store::Scope::Device("dev-1".into()),
+                "notes",
+                r#""remember adapters""#,
+            )
+            .expect("writes");
+
+        let ResponsePayload::Result(v) = dispatch(
+            &ctx,
+            &request(
+                "storage.query",
+                Some(serde_json::json!({ "slug": "trip-planner", "scope": "devices" })),
+            ),
+        ) else {
+            panic!("querying should succeed");
+        };
+
+        let devices = v["devices"].as_array().expect("devices");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["keys"], 1);
+        assert!(
+            !v.to_string().contains("remember adapters"),
+            "a value must not appear in the per-device view: {v}"
+        );
+    }
+
+    #[test]
+    fn querying_an_app_that_is_not_here_is_a_not_found() {
+        let (ctx, _dir) = context_on_disk();
+
+        let ResponsePayload::Error(e) = dispatch(
+            &ctx,
+            &request("storage.query", Some(serde_json::json!({ "slug": "gone" }))),
+        ) else {
+            panic!("an unknown app should be refused");
+        };
+        assert!(matches!(e.code, ErrorCode::NotFound));
     }
 
     #[test]
