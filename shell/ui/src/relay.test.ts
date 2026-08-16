@@ -10,6 +10,8 @@ function app(over: Partial<App> = {}): App {
     version: 1,
     paused: false,
     relay: "off",
+    storage: "synced",
+    storage_backup: true,
     public_label: "chester",
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",
@@ -34,6 +36,8 @@ describe("where Open goes", () => {
   it("goes to the public address once an app is published and the tunnel is up", () => {
     const published = app({
       relay: "standard",
+      storage: "synced",
+      storage_backup: true,
       public_url: "https://chester-adarsh.kitchentable.cloud",
     });
     const shown = handover(published, { state: "connected" });
@@ -57,6 +61,8 @@ describe("where Open goes", () => {
     // not offering the public name at all.
     const published = app({
       relay: "standard",
+      storage: "synced",
+      storage_backup: true,
       public_url: "https://chester-adarsh.kitchentable.cloud",
     });
     const shown = handover(published, { state: "needs_attention", message: "no route" });

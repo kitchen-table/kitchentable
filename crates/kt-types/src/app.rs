@@ -108,10 +108,81 @@ pub struct AppManifest {
     /// `None` means "use the slug", which is every app until somebody edits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_label: Option<String>,
+    /// Where this app's data lives: one shared set, or one set per device.
+    ///
+    /// Beside `visibility` and `relay` because it is the same kind of fact -
+    /// a decision by the owner that has to outlive a restart - and orthogonal
+    /// to both. Who may open an app, whether it leaves the house, and whether
+    /// two people editing it see the same thing are three different questions.
+    #[serde(default, skip_serializing_if = "StorageMode::is_synced")]
+    pub storage: StorageMode,
+    /// Whether this Mac keeps a copy of what each device holds.
+    ///
+    /// Only means anything under [`StorageMode::PerDevice`]: under `Synced`
+    /// the data is already here, so there is nothing to copy. Defaults to on,
+    /// because the failure it prevents - a phone breaks and takes a year of
+    /// somebody's notes with it - is worse and less recoverable than the one it
+    /// causes, which is the owner's Mac holding a copy of data from their own
+    /// household.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub storage_backup: bool,
     /// Unknown keys are preserved verbatim so a manifest written by a newer
     /// daemon survives a round-trip through an older one.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Where an app's data lives.
+///
+/// Two modes and deliberately no third for "off". An app always has somewhere
+/// to keep things; the only question is whether that somewhere is shared. A
+/// mode meaning "no storage at all" would be a way to break an app by
+/// configuration, and an app that stores nothing already achieves it by
+/// storing nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum StorageMode {
+    /// One shared set of data. An edit on a phone shows up on a laptop, and
+    /// everyone with access sees the same thing. A shared list or tracker.
+    #[default]
+    Synced,
+    /// Each device keeps its own private copy and nothing is shared between
+    /// them. Personal notes, drafts, per-user settings - two people using one
+    /// workout app without seeing each other's workouts.
+    PerDevice,
+}
+
+impl StorageMode {
+    pub const fn is_synced(&self) -> bool {
+        matches!(self, Self::Synced)
+    }
+
+    /// Whether a copy on this machine is a thing that could exist.
+    ///
+    /// Under `Synced` the data is already here, so the backup switch has
+    /// nothing to act on and the window draws it as inert rather than as a
+    /// control that silently does nothing.
+    pub const fn can_back_up(&self) -> bool {
+        matches!(self, Self::PerDevice)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Synced => "Keep in sync everywhere",
+            Self::PerDevice => "Separate on each device",
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Serde needs a predicate by reference, and `bool::then` is not it.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_yes(value: &bool) -> bool {
+    *value
 }
 
 fn default_entry() -> String {
@@ -346,6 +417,8 @@ impl AppRecord {
             version: m.version,
             paused: m.paused,
             relay: m.relay,
+            storage: m.storage,
+            storage_backup: m.storage_backup,
             url: match &urls.hostname {
                 Some(host) => format!("{}://{host}{}", urls.scheme, urls.port_suffix),
                 None => prefix_url.clone(),
@@ -434,6 +507,15 @@ pub struct App {
     /// can be set but not read would show every published app as unpublished.
     #[serde(default)]
     pub relay: RelayMode,
+    /// Whether everyone shares one set of this app's data, or each device keeps
+    /// its own. Carried for the same reason `relay` is: a setting the window can
+    /// change but not read would draw every app as though it were the default.
+    #[serde(default)]
+    pub storage: StorageMode,
+    /// Whether this machine keeps a copy of what each device holds. Only means
+    /// anything under [`StorageMode::PerDevice`].
+    #[serde(default = "yes")]
+    pub storage_backup: bool,
     /// Friendly URL, e.g. `http://trip-planner.local`. Falls back to the
     /// prefix URL when nothing was announced.
     pub url: String,
@@ -504,6 +586,8 @@ mod tests {
         AppRecord {
             manifest: AppManifest {
                 relay: RelayMode::Off,
+                storage: StorageMode::Synced,
+                storage_backup: true,
                 public_label: None,
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),

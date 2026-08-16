@@ -18,6 +18,8 @@ function app(over: Partial<App> = {}): App {
     version: 3,
     paused: false,
     relay: "off",
+    storage: "synced",
+    storage_backup: true,
     public_label: "trip",
     url: "http://trip-planner.local",
     hostname: "trip-planner.local",

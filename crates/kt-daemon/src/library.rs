@@ -305,6 +305,8 @@ mod tests {
         AppRecord::unmeasured(
             AppManifest {
                 relay: Default::default(),
+                storage: Default::default(),
+                storage_backup: true,
                 public_label: None,
                 name: name.into(),
                 slug: slug.into(),

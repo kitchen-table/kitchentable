@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kt_types::{AppManifest, AppRecord, RelayMode, Visibility};
+use kt_types::{AppManifest, AppRecord, RelayMode, StorageMode, Visibility};
 use notify::{RecursiveMode, Watcher};
 
 pub mod slug;
@@ -172,6 +172,11 @@ impl Registry {
             // A new folder is not on the internet. Nothing about appearing in
             // the workspace publishes anything.
             relay: RelayMode::Off,
+            // One shared store, which is what an app means by storage until
+            // somebody says otherwise, and a copy kept here so a lost phone
+            // does not take anything with it.
+            storage: StorageMode::default(),
+            storage_backup: true,
             // Unset, not "the slug": an app that has never been renamed should
             // follow its folder, and only an explicit edit stops that.
             public_label: None,

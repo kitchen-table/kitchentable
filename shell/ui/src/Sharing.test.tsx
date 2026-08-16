@@ -19,6 +19,8 @@ function app(over: Partial<App> = {}): App {
     version: 1,
     paused: false,
     relay: "off",
+    storage: "synced",
+    storage_backup: true,
     public_label: "trip",
     url: "http://trip.local",
     fallback_url: "http://192.168.0.5/trip",
@@ -282,6 +284,8 @@ describe("Sharing: whether it is actually reachable", () => {
           relay_handle: "adarsh",
           relay_domain: "kitchentable.cloud",
           relay: state,
+          storage: "synced",
+          storage_backup: true,
         });
       }
       return Promise.resolve([]);

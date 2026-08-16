@@ -222,6 +222,47 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&serde_json::json!({ "slug": slug, "relay": raw }))
         }
 
+        // Where this app's data lives, and whether this machine keeps a copy.
+        //
+        // Neither half touches who may open the app or whether it leaves the
+        // house, which is why this is a third orthogonal switch rather than
+        // something folded into `set_visibility`.
+        "storage.set_mode" => {
+            let slug = string_param(request, "slug")?;
+            let raw = string_param(request, "mode")?;
+            let mode = match raw.as_str() {
+                "synced" => kt_types::StorageMode::Synced,
+                "per_device" => kt_types::StorageMode::PerDevice,
+                other => {
+                    return Err(KtError {
+                        code: ErrorCode::BadRequest,
+                        message: format!("{other:?} is not a storage mode"),
+                        detail: None,
+                    })
+                }
+            };
+            // Absent means "leave it alone", so a window changing only the mode
+            // does not silently turn backups off.
+            let record = ctx.library.record(&slug).ok_or_else(|| not_found(&slug))?;
+            let backup = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("backup"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(record.manifest.storage_backup);
+
+            write_storage(&record.path, mode, backup).map_err(|e| KtError {
+                code: ErrorCode::Io,
+                message: format!("could not update the manifest: {e}"),
+                detail: None,
+            })?;
+            json(&serde_json::json!({
+                "slug": slug,
+                "storage": raw,
+                "backup": backup,
+            }))
+        }
+
         // Rename the app's public address, without touching anything local.
         //
         // A third separate call, for the third distinct decision. `label: null`
@@ -608,6 +649,29 @@ fn parse_relay_mode(raw: &str) -> Result<kt_types::RelayMode, KtError> {
 /// visibility is: `app.json` is the source of truth and the watcher picks it
 /// up. A value that lived only in the database would disagree with the folder
 /// the moment anybody edited it.
+/// Write where an app's data lives, and whether this machine keeps a copy.
+///
+/// Both in one call because the window sets them from one panel and they are
+/// one decision to a person: how this app remembers things. Splitting them the
+/// way `set_relay` and `set_public_label` are split would buy nothing, since
+/// neither can put anything on the internet or change who may open the app.
+fn write_storage(path: &str, mode: kt_types::StorageMode, backup: bool) -> std::io::Result<()> {
+    let manifest_path = std::path::Path::new(path).join("app.json");
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    manifest["storage"] = serde_json::json!(match mode {
+        kt_types::StorageMode::Synced => "synced",
+        kt_types::StorageMode::PerDevice => "per_device",
+    });
+    manifest["storage_backup"] = serde_json::json!(backup);
+
+    let pretty = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&manifest_path, format!("{pretty}\n"))
+}
+
 fn write_relay(path: &str, mode: kt_types::RelayMode) -> std::io::Result<()> {
     let manifest_path = std::path::Path::new(path).join("app.json");
     let raw = std::fs::read_to_string(&manifest_path)?;
@@ -860,6 +924,8 @@ mod tests {
         library.replace(vec![AppRecord::unmeasured(
             AppManifest {
                 relay: Default::default(),
+                storage: Default::default(),
+                storage_backup: true,
                 public_label: None,
                 name: "Trip Planner".into(),
                 slug: "trip-planner".into(),
@@ -1058,6 +1124,68 @@ mod tests {
         );
         assert_eq!(invite["pin_to_first_device"], true, "links pin by default");
         assert_eq!(invite["active"], true);
+    }
+
+    #[test]
+    fn where_an_apps_data_lives_can_be_changed_and_survives_in_the_manifest() {
+        let (ctx, dir) = context_on_disk();
+
+        let ResponsePayload::Result(v) = dispatch(
+            &ctx,
+            &request(
+                "storage.set_mode",
+                Some(serde_json::json!({ "slug": "trip-planner", "mode": "per_device" })),
+            ),
+        ) else {
+            panic!("setting the mode should succeed");
+        };
+        assert_eq!(v["storage"], "per_device");
+
+        let written = std::fs::read_to_string(dir.path().join("app.json")).expect("reads back");
+        assert!(written.contains("\"storage\": \"per_device\""), "{written}");
+    }
+
+    #[test]
+    fn changing_only_the_mode_leaves_the_backup_setting_where_it_was() {
+        // The window sends the mode on its own when somebody presses a card.
+        // Defaulting the absent field would quietly turn backups off, which is
+        // the one setting here whose loss is not recoverable.
+        let (ctx, dir) = context_on_disk();
+
+        dispatch(
+            &ctx,
+            &request(
+                "storage.set_mode",
+                Some(serde_json::json!({
+                    "slug": "trip-planner",
+                    "mode": "per_device",
+                    "backup": false
+                })),
+            ),
+        );
+        // The library still holds the record loaded at startup, so re-reading
+        // the file is what proves the second call kept the first one's answer.
+        let after_first = std::fs::read_to_string(dir.path().join("app.json")).expect("reads");
+        assert!(
+            after_first.contains("\"storage_backup\": false"),
+            "{after_first}"
+        );
+    }
+
+    #[test]
+    fn a_storage_mode_this_daemon_does_not_know_is_refused() {
+        let (ctx, _dir) = context_on_disk();
+
+        let ResponsePayload::Error(e) = dispatch(
+            &ctx,
+            &request(
+                "storage.set_mode",
+                Some(serde_json::json!({ "slug": "trip-planner", "mode": "sometimes" })),
+            ),
+        ) else {
+            panic!("an unknown mode should be refused");
+        };
+        assert!(matches!(e.code, ErrorCode::BadRequest));
     }
 
     #[test]
