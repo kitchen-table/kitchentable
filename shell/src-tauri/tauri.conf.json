@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "pnpm -C ui dev",
-    "beforeBuildCommand": "pnpm -C ui build"
+    "beforeBuildCommand": "pnpm -C ui build && node scripts/stage-daemon.mjs"
   },
   "app": {
     "windows": [
@@ -32,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app"],
+    "externalBin": ["binaries/kt-daemon"],
     "category": "Productivity",
     "shortDescription": "A home for your small software.",
     "longDescription": "Kitchen Table turns any folder on your computer into a live web app that the people you choose can open on their phones.",

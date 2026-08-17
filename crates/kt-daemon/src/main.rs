@@ -21,6 +21,7 @@ mod rpc;
 mod socket;
 mod storage;
 mod trust;
+mod welcome;
 
 use library::Library;
 
@@ -92,6 +93,10 @@ async fn run() -> Result<(), StartupError> {
 
     let registry = Registry::new(&workspace);
     registry.ensure_workspace()?;
+
+    // Before the first scan, so onboarding's fourth step has an app to show the
+    // moment the window opens rather than after a watcher settles.
+    welcome::seed(&workspace, &store);
     // Each app's own key-value store, one SQLite file each. Shared between the
     // HTTP layer, which apps write through, and the socket, which reads them
     // back for the owner's Storage tab.

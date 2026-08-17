@@ -1,16 +1,22 @@
 /**
  * The onboarding flow.
  *
- * Eight steps, six required and two optional, matching onboarding.md section 2
- * and the macOS mockup. The order is the point: the aha moment is a QR code on
- * step 4 and a phone opening the app on step 5, so everything before them is
- * kept to what is genuinely needed first.
+ * Nine steps, seven required and two optional, matching the macOS mockup. The
+ * order is the point: the aha moment is a QR code on step 4 and a phone opening
+ * the app on step 6, so everything before them is kept to what is genuinely
+ * needed first.
+ *
+ * Notifications sits between them deliberately. It is the permission that makes
+ * the *next* step work without the window open - the banner is how an access
+ * request is answered - so it is asked for immediately before the step that
+ * produces one, and after the app it will be about exists.
  */
 export const STEPS = [
   "welcome",
   "workspace",
   "network",
   "first-app",
+  "notifications",
   "pair",
   "ready",
   "agent",
@@ -25,6 +31,7 @@ export const REQUIRED: Step[] = [
   "workspace",
   "network",
   "first-app",
+  "notifications",
   "pair",
   "ready",
 ];
@@ -35,6 +42,7 @@ export const LABELS: Record<Step, string> = {
   workspace: "Workspace",
   network: "Network",
   "first-app": "Your first app",
+  notifications: "Notifications",
   pair: "Pair your phone",
   ready: "You're all set",
   agent: "Connect your agent",

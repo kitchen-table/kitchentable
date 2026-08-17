@@ -5,7 +5,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kitchen-table/kitchentable"
-rust-version = "1.85"
+# Higher than the workspace's 1.85, and only here. `mac-usernotifications`
+# needs 1.90, and this crate is the one place that can afford it: the shell is
+# built on macOS with stable only (docs/repo-architecture.md section 6), while
+# the daemon and its crates stay at 1.85 for anybody packaging them elsewhere.
+rust-version = "1.90"
 
 # Deliberately its own workspace root. Tauri needs system WebKit, which the
 # Linux CI runner does not have; keeping it out of the root workspace means
@@ -22,6 +26,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 kt-types = { version = "0.1.0", path = "../../crates/kt-types" }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tauri = { version = "2", features = ["tray-icon"] }
 # Launch at login. A LaunchAgent plist written by hand would be the same
@@ -33,3 +38,16 @@ tauri-plugin-opener = "2.5.4"
 thiserror = "2.0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Desktop notifications, over `UNUserNotificationCenter`.
+#
+# Not `tauri-plugin-notification`, which was tried first and cannot do this
+# job: on desktop it sets a title and a body and nothing else, so the Approve
+# and Deny buttons the design puts on an access request are impossible, and its
+# permission API is a stub that answers "granted" without asking macOS
+# anything - which would have us drawing a settled permission state we had
+# never checked. This crate wraps the framework Apple actually supports, and
+# with it the prompt, the real authorisation status and the buttons are all
+# available. It requires a bundled, signed app; see `notify.rs`.
+mac-usernotifications = "0.3.1"

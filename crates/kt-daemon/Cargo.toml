@@ -42,3 +42,4 @@ tracing-subscriber.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }
 kt-auth = { path = "../kt-auth" }
 kt-mdns = { path = "../kt-mdns" }
+tempfile = "3.27.0"

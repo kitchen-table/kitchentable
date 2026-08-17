@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Mark } from "../Mark";
 import type { App, SysStatus } from "../generated";
+import { sizeForApp, sizeForOnboarding } from "../windowSize";
 import { Rail } from "./Rail";
 import { Screens } from "./Screens";
 import {
@@ -33,6 +34,14 @@ export function Onboarding({
   onDone: () => void;
 }) {
   const [step, setStep] = useState<Step>("welcome");
+
+  // Onboarding is a panel and the app is a workspace; they are not the same
+  // window shape. Restoring on unmount rather than in `finish` covers the other
+  // way out of here too - a daemon that drops takes the whole flow off screen.
+  useEffect(() => {
+    void sizeForOnboarding();
+    return () => void sizeForApp();
+  }, []);
 
   function finish() {
     markComplete();

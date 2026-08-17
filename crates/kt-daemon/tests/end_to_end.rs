@@ -299,6 +299,9 @@ fn spawn(home: &Path, workspace: &Path, port: u16, own_address: bool) -> Child {
         // Announcing on the network from a test would publish junk
         // hostnames on whatever LAN CI happens to sit on.
         .env("KT_NO_MDNS", "1")
+        // No sample app: these fixtures are about what the test puts in the
+        // workspace, and one we created would be a second author.
+        .env("KT_NO_SAMPLE", "1")
         // The Keychain is per-user, not per-HOME, so every daemon in this
         // suite would share one session key and defeat the isolation the
         // scratch HOME above exists to provide - and on a developer's machine

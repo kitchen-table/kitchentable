@@ -1,13 +1,20 @@
 import { Mark } from "../Mark";
-import { DeviceIcon, MoonIcon, SearchIcon } from "../icons";
+import { BellIcon, MoonIcon, SearchIcon } from "../icons";
 
 /**
- * The window's top strip: mark, search, pending-device bell, appearance, new app.
+ * The window's top strip: mark, search, notifications, appearance, new app.
  *
  * The mockup draws macOS traffic lights here. We do not: the window uses the
  * native overlay title bar style, so the real buttons float over this strip and
  * `--traffic-inset` reserves the room they need. Drawing our own would give the
  * user two sets, one of them fake.
+ *
+ * The mockup also draws a second icon, a handset, beside the bell. It is absent
+ * here because in the mockup it exists to toggle the pairing dialog on and off
+ * for review, and this window raises that dialog by itself the moment a device
+ * asks. A button whose whole job is to summon something that comes on its own
+ * would be a control with nothing behind it. What it stood for - the count of
+ * devices waiting - is on the bell, where the rail also carries it.
  */
 export function TitleBar({
   query,
@@ -82,14 +89,16 @@ export function TitleBar({
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <IconButton
           label={
-            pending === 1
-              ? "1 device waiting for approval"
-              : `${pending} devices waiting for approval`
+            pending === 0
+              ? "Notifications"
+              : pending === 1
+                ? "Notifications: 1 device waiting for approval"
+                : `Notifications: ${pending} devices waiting for approval`
           }
           onClick={onPending}
           badge={pending}
         >
-          <DeviceIcon size={16} colour="var(--ink2)" />
+          <BellIcon size={16} colour="var(--ink2)" />
         </IconButton>
 
         <IconButton

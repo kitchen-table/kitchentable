@@ -24,3 +24,7 @@ shell/src-tauri/gen/
 
 # ts-rs intermediate output; the committed copy is shell/ui/src/generated
 crates/kt-types/bindings/
+
+# kt-daemon staged for the app bundle. Built by shell/scripts/stage-daemon.mjs
+# on every `tauri build`; a committed copy would be a binary that goes stale.
+shell/src-tauri/binaries/

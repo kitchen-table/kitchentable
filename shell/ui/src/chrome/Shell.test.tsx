@@ -124,7 +124,9 @@ describe("Shell", () => {
     const { unmount } = show();
 
     await waitFor(() => {
-      const waiting = screen.getByRole("button", { name: "2 devices waiting for approval" });
+      const waiting = screen.getByRole("button", {
+        name: "Notifications: 2 devices waiting for approval",
+      });
       expect(within(waiting).getByText("2")).toBeDefined();
     });
     unmount();
@@ -133,7 +135,9 @@ describe("Shell", () => {
     // is that nothing is happening unless you said so.
     withDevices([]);
     show();
-    const idle = screen.getByRole("button", { name: "0 devices waiting for approval" });
+    // By title, not by name: the rail now carries a Notifications row too,
+    // and this assertion is about the title bar's bell.
+    const idle = screen.getByTitle("Notifications");
     expect(within(idle).queryByText("0")).toBeNull();
   });
 
@@ -158,7 +162,9 @@ describe("Shell", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(
-      screen.getByRole("button", { name: "1 device waiting for approval" }),
+      screen.getByRole("button", {
+        name: "Notifications: 1 device waiting for approval",
+      }),
     ).toBeDefined();
     expect(call).not.toHaveBeenCalledWith(
       "kt_call",

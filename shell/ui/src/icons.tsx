@@ -58,6 +58,25 @@ export function ActivityIcon(props: IconProps) {
   );
 }
 
+/** A folder: the watched workspace, on onboarding's second step. */
+export function FolderIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </Svg>
+  );
+}
+
+/** A bell: notifications. Drawn in the mockup's title bar and its rail row. */
+export function BellIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M18 8.5a6 6 0 0 0-12 0c0 6-2.5 7.5-2.5 7.5h17S18 14.5 18 8.5z" />
+      <path d="M10.5 20a2 2 0 0 0 3 0" />
+    </Svg>
+  );
+}
+
 /** Two sliders. */
 export function SettingsIcon(props: IconProps) {
   return (
