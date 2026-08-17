@@ -197,12 +197,19 @@ export const STRICT_AVAILABLE = false;
  * over the wire because it decides which radio button starts selected, which is
  * a question the window can answer before it has asked the daemon anything.
  *
- * Invited apps are somebody's private thing shared with named people, so they
- * suggest the mode the operator cannot read. Public apps are already public, so
- * they suggest the one that keeps the link alive when the laptop shuts.
+ * Standard, at every visibility, and this used to suggest Strict for everything
+ * but Public. Strict has no snapshot — no plaintext at the edge means there is
+ * nothing to store — so a Strict app goes dark with the laptop. Suggesting it
+ * for Invited pointed the *common* case, the rota shared with one person,
+ * straight at the mode that turns off the thing the paid tier is bought for.
+ *
+ * Strict stays a deliberate choice for the app somebody means it for, rather
+ * than the answer they accept because it was already selected. The argument is
+ * about defaults, not about whether Strict is good; if you are restoring the
+ * old shape, read this paragraph and `RelayMode::suggested_for` first.
  */
-export function suggestedFor(visibility: Visibility): Exclude<RelayMode, "off"> {
-  return visibility === "public" ? "standard" : "strict";
+export function suggestedFor(_visibility: Visibility): Exclude<RelayMode, "off"> {
+  return "standard";
 }
 
 /**

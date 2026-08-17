@@ -178,11 +178,15 @@ export function Sharing({ app }: { app: App }) {
         </div>
       </div>
 
+      {/*
+       * No `onChoose` here any more: with Strict deferred there is one mode, so
+       * the block has nothing to switch between. `setRelay.mutate(mode)` is the
+       * line to put back alongside the card grid when Strict ships.
+       */}
       <RelayBlock
         app={app}
         busy={setRelay.isPending}
         onTurnOn={() => setGateOpen(true)}
-        onChoose={(mode) => setRelay.mutate(mode)}
         onTurnOff={() => setRelay.mutate("off")}
       />
 
@@ -207,13 +211,11 @@ function RelayBlock({
   app,
   busy,
   onTurnOn,
-  onChoose,
   onTurnOff,
 }: {
   app: App;
   busy: boolean;
   onTurnOn: () => void;
-  onChoose: (mode: RelayMode) => void;
   onTurnOff: () => void;
 }) {
   const on = app.relay !== "off";
@@ -222,6 +224,19 @@ function RelayBlock({
   const status = useStatus(true);
   // The badge reads the tunnel, not the manifest. See `reachability`.
   const reach = reachability(on, status.data?.relay);
+  // No handle means no hostname exists for any app on this machine, so there is
+  // nowhere to publish to. Asked here as well as in `PublicUrl` because the
+  // switch has to know before it is pressed, not after.
+  //
+  // Three states, not two. Until the daemon has answered we do not know, and
+  // swapping the card out on arrival would flash one screen into another - so
+  // the offer stays drawn with its button disabled, the same treatment the
+  // launch-at-login switch gives an answer it has not received.
+  // Called unconditionally: `known && !useRelaySuffix()` short-circuits, which
+  // skips a hook on some renders and takes the whole surface down with it.
+  const suffix = useRelaySuffix();
+  const known = status.data !== undefined;
+  const noHandle = known && !suffix;
 
   return (
     <div style={{ marginTop: 22 }}>
@@ -279,7 +294,9 @@ function RelayBlock({
 
       {!applies && !on && <RelayDoesNotApply level={app.visibility} />}
 
-      {applies && !on && (
+      {applies && !on && noHandle && <RelayHasNowhereToGo app={app} />}
+
+      {applies && !on && !noHandle && (
         <div
           style={{
             background:
@@ -307,14 +324,14 @@ function RelayBlock({
                 color: "var(--ink3)",
               }}
             >
-              Give it a stable public URL that works away from your network. You
-              choose how it is served the moment you switch it on.
+              Give it a stable public URL that works away from your network.
+              Nothing else in your workspace is published by this.
             </div>
           </div>
           <button
             type="button"
             onClick={onTurnOn}
-            disabled={busy}
+            disabled={busy || !known}
             style={{
               background: "var(--accent)",
               color: "#fff",
@@ -323,7 +340,8 @@ function RelayBlock({
               borderRadius: 10,
               font: "600 13px var(--font-sans)",
               whiteSpace: "nowrap",
-              cursor: busy ? "default" : "pointer",
+              cursor: busy || !known ? "default" : "pointer",
+              opacity: known ? 1 : 0.6,
             }}
           >
             Turn on relay
@@ -333,26 +351,18 @@ function RelayBlock({
 
       {on && (
         <>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 12,
-            }}
-          >
-            <ModeCard
-              mode="standard"
-              selected={app.relay === "standard"}
-              busy={busy}
-              onSelect={() => onChoose("standard")}
-            />
-            <ModeCard
-              mode="strict"
-              selected={app.relay === "strict"}
-              busy={busy}
-              onSelect={() => onChoose("strict")}
-            />
-          </div>
+          {/*
+           * One card, not two. Strict is deferred, so there is one mode - and a
+           * pair of radio buttons with one working answer is a choice drawn
+           * where none exists. That is the same fault the whole tab was built
+           * to remove.
+           *
+           * Not the same case as the disabled Strict option below: a control
+           * somebody came looking for gets told why it will not work, but a
+           * control nobody asked for is just a dead switch. Restore the grid
+           * when Strict ships.
+           */}
+          <ModeCard mode="standard" only busy={busy} onSelect={() => {}} />
 
           <PublicUrl app={app} />
 
@@ -481,34 +491,50 @@ function RelayDoesNotApply({ level }: { level: Visibility }) {
   );
 }
 
+/**
+ * One relay mode, as a card.
+ *
+ * `only` is the case where it is the *sole* mode - Strict is deferred, so
+ * there is nothing to choose between. It renders as a statement rather than a
+ * control: no radio, no pressed state, not a button. A radio group with one
+ * option is a choice drawn where none exists, which is the fault this tab was
+ * built to remove.
+ */
 function ModeCard({
   mode,
-  selected,
+  selected = false,
+  only = false,
   busy,
   onSelect,
 }: {
   mode: Exclude<RelayMode, "off">;
-  selected: boolean;
+  selected?: boolean;
+  only?: boolean;
   busy: boolean;
   onSelect: () => void;
 }) {
   const info = RELAY[mode];
   const unavailable = mode === "strict" && !STRICT_AVAILABLE;
   const disabled = busy || unavailable;
+  const Box = only ? "div" : "button";
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={disabled}
-      aria-pressed={selected}
+    <Box
+      {...(only
+        ? {}
+        : {
+            type: "button" as const,
+            onClick: onSelect,
+            disabled,
+            "aria-pressed": selected,
+          })}
       style={{
         textAlign: "left",
         background: selected ? "var(--accent-tint)" : "var(--paper)",
         border: `2px solid ${selected ? "var(--accent)" : "var(--border)"}`,
         borderRadius: 13,
         padding: 16,
-        cursor: disabled ? "default" : "pointer",
+        cursor: only || disabled ? "default" : "pointer",
         opacity: unavailable ? 0.62 : 1,
       }}
     >
@@ -535,20 +561,23 @@ function ModeCard({
           {mode === "standard" ? "DEFAULT" : "END-TO-END"}
         </span>
         {unavailable && <Soon>NOT YET</Soon>}
-        <span
-          aria-hidden="true"
-          style={{
-            marginLeft: "auto",
-            width: 17,
-            height: 17,
-            flex: "none",
-            borderRadius: "50%",
-            border: `2px solid ${selected ? "var(--accent)" : "var(--border2)"}`,
-            background: selected
-              ? "radial-gradient(circle, var(--accent) 0 4px, transparent 4px)"
-              : "none",
-          }}
-        />
+        {/* No radio when this is the only mode — see `only` above. */}
+        {!only && (
+          <span
+            aria-hidden="true"
+            style={{
+              marginLeft: "auto",
+              width: 17,
+              height: 17,
+              flex: "none",
+              borderRadius: "50%",
+              border: `2px solid ${selected ? "var(--accent)" : "var(--border2)"}`,
+              background: selected
+                ? "radial-gradient(circle, var(--accent) 0 4px, transparent 4px)"
+                : "none",
+            }}
+          />
+        )}
       </span>
 
       <span style={{ display: "flex", flexDirection: "column", gap: 9 }}>
@@ -587,7 +616,7 @@ function ModeCard({
           yet. Kitchen Table will not quietly serve Standard in its place.
         </span>
       )}
-    </button>
+    </Box>
   );
 }
 
@@ -638,6 +667,52 @@ function useRelaySuffix(): string | null {
 }
 
 /**
+ * The relay, on a machine that has no handle to publish under.
+ *
+ * Drawn instead of the Turn-on card, and the reason is the rule this whole tab
+ * exists for. A public hostname is `<label>-<handle>.<domain>`, so with no
+ * handle there is no name for any app here - pressing the button wrote
+ * `relay: standard` into the manifest, changed nothing about what anybody could
+ * reach, and then explained itself afterwards with "this app is published, but
+ * there is no public address". A switch that can only do nothing is the same
+ * class of lie as a blurb promising reach, and it is worse for arriving after
+ * the press rather than before it.
+ *
+ * Stated as a fact about the machine rather than about the app, because it is
+ * one: every app here is in the same position, and none of them is broken.
+ */
+function RelayHasNowhereToGo({ app }: { app: App }) {
+  return (
+    <div
+      style={{
+        background: "var(--paper)",
+        border: "1px solid var(--border)",
+        borderRadius: 13,
+        padding: 18,
+      }}
+    >
+      <div style={{ font: "700 14px var(--font-sans)", marginBottom: 4 }}>
+        Not available yet
+      </div>
+      <p
+        style={{
+          margin: 0,
+          font: "400 12px/1.55 var(--font-sans)",
+          color: "var(--ink3)",
+        }}
+      >
+        Publishing needs a handle — the part after the hyphen in a public
+        address — and this machine does not have one until you link an account.
+        There is nowhere to publish to yet, so there is nothing to switch on.{" "}
+        <b style={{ fontWeight: 600 }}>{app.name}</b> is reachable on your
+        network at <b style={{ fontWeight: 600 }}>{app.url}</b>, as it was
+        before.
+      </p>
+    </div>
+  );
+}
+
+/**
  * The address this app answers to away from home, and the field to change it.
  *
  * Editable because the slug comes from a folder name, and a folder name is a
@@ -674,10 +749,11 @@ function PublicUrl({ app }: { app: App }) {
           color: "var(--ink3)",
         }}
       >
-        <b style={{ color: "var(--gold)" }}>No public address yet.</b> This app
-        is published, but this machine has no handle to hang a name off — that
-        arrives when you link an account. Until then it is reachable on your
-        network only, at <b style={{ fontWeight: 600 }}>{app.url}</b>.
+        <b style={{ color: "var(--gold)" }}>No public address yet.</b> The relay
+        is switched on for this app, but this machine has no handle to hang a
+        name off — that arrives when you link an account — so nothing is
+        published anywhere. It is reachable on your network only, at{" "}
+        <b style={{ fontWeight: 600 }}>{app.url}</b>, exactly as it was before.
       </p>
     );
   }
@@ -1052,7 +1128,7 @@ function RelayGate({
           margin: "0 0 9px",
         }}
       >
-        Should this app stay reachable when this machine is asleep?
+        This app gets a public address.
       </h2>
       <p
         style={{
@@ -1061,15 +1137,25 @@ function RelayGate({
           margin: "0 0 20px",
         }}
       >
-        Staying reachable means Kitchen Table's servers hold a copy. Choosing
-        full privacy means the link only works while this machine is on.
+        Anyone you have shared it with can open it from anywhere, and Kitchen
+        Table's servers carry it — which means they can technically read it.
+        Nothing else in your workspace is published by this.
       </p>
 
       <GateAddress app={app} />
 
+      {/*
+       * One option, and it is the confirm. This used to open on "Should this
+       * app stay reachable when this machine is asleep?" with Standard and
+       * Strict beneath it, which was the right question while both modes were
+       * coming. With Strict deferred it is a fork with one road, and the honest
+       * shape is a confirmation of what publishing does rather than a choice
+       * between two things one of which is disabled.
+       *
+       * Restoring the pair is this block plus the heading and lede above.
+       */}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <GateOption mode="standard" onChoose={onChoose} />
-        <GateOption mode="strict" onChoose={onChoose} />
       </div>
 
       <div
@@ -1087,9 +1173,10 @@ function RelayGate({
             color: "var(--muted)",
           }}
         >
-          Suggested for {VISIBILITY[app.visibility].label} apps:{" "}
-          <b style={{ color: "var(--ink2)" }}>{RELAY[suggested].promise}</b>. You
-          can change it any time.
+          {VISIBILITY[app.visibility].label} apps use{" "}
+          <b style={{ color: "var(--ink2)" }}>{RELAY[suggested].promise}</b>. A
+          full-privacy mode, where our servers could not read this app, is
+          designed and not built.
         </span>
         <button
           type="button"

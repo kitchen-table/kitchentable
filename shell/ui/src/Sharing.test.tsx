@@ -44,6 +44,29 @@ function renderSharing(over: Partial<App> = {}) {
   );
 }
 
+/**
+ * A daemon that has a handle, so publishing is possible at all.
+ *
+ * Needed by every test that reaches the Turn-on button, because without a
+ * handle there is no public hostname for any app here and the button is
+ * deliberately not drawn — see `RelayHasNowhereToGo`. The default mock has no
+ * handle, which is the state of every install today.
+ */
+function withHandle() {
+  invoke.mockImplementation((_cmd: unknown, args: unknown) => {
+    const method = (args as { method: string }).method;
+    if (method === "sys.status") {
+      return Promise.resolve({
+        relay_handle: "adarsh",
+        relay_domain: "kitchentable.cloud",
+        storage: "synced",
+        storage_backup: true,
+      });
+    }
+    return Promise.resolve([]);
+  });
+}
+
 describe("Sharing", () => {
   beforeEach(() => {
     invoke.mockReset();
@@ -132,13 +155,53 @@ describe("Sharing: the relay", () => {
     expect(screen.queryByText("ON")).toBeNull();
   });
 
-  it("does not publish an app without asking how it should be served", async () => {
-    renderSharing({ visibility: "invited" });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on relay" }));
+  /** Open the turn-on modal on a machine that can actually publish. */
+  async function openTheGate(over: Partial<App> = {}) {
+    withHandle();
+    renderSharing({ visibility: "invited", ...over });
+    const button = await screen.findByRole("button", { name: "Turn on relay" });
+    await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(button);
+  }
 
-    // The switch opens the choice. Nothing reaches the daemon until a mode is
-    // picked, because defaulting the sensitive case silently is the whole
-    // thing this modal exists to prevent.
+  it("does not offer the switch when this machine has no handle", async () => {
+    // The default mock has no handle, which is every install today. Publishing
+    // needs `<label>-<handle>.<domain>`, so with no handle there is no name for
+    // any app here — pressing the button wrote `relay: standard` into the
+    // manifest, changed nothing anybody could reach, and explained itself
+    // afterwards. A switch that can only do nothing must not be drawn.
+    renderSharing({ visibility: "invited" });
+
+    expect(await screen.findByText(/Not available yet/)).toBeDefined();
+    expect(screen.getByText(/nowhere to publish to yet/)).toBeDefined();
+    const button = screen.queryByRole("button", { name: "Turn on relay" });
+    expect(button).toBeNull();
+  });
+
+  it("waits for the daemon before claiming the switch works", async () => {
+    // Unknown is its own state. Drawing the offer as live before the daemon has
+    // said whether there is a handle is a claim about the machine, not a delay.
+    withHandle();
+    renderSharing({ visibility: "invited" });
+
+    expect(
+      screen.getByRole("button", { name: "Turn on relay" }).hasAttribute("disabled"),
+    ).toBe(true);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Turn on relay" })
+          .hasAttribute("disabled"),
+      ).toBe(false),
+    );
+  });
+
+  it("does not publish an app without asking how it should be served", async () => {
+    await openTheGate();
+
+    // The switch opens the confirmation. Nothing reaches the daemon until it is
+    // answered, because publishing as a side effect of any other action is the
+    // whole thing this modal exists to prevent.
     expect(screen.getByRole("dialog")).toBeDefined();
     expect(invoke).not.toHaveBeenCalledWith(
       "kt_call",
@@ -147,8 +210,7 @@ describe("Sharing: the relay", () => {
   });
 
   it("publishes with the mode the owner picked", async () => {
-    renderSharing({ visibility: "invited" });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on relay" }));
+    await openTheGate();
     fireEvent.click(screen.getByRole("button", { name: /Stay reachable/ }));
 
     await waitFor(() => {
@@ -159,37 +221,47 @@ describe("Sharing: the relay", () => {
     });
   });
 
-  it("suggests Strict for Invited and Standard for Public, without applying it", () => {
-    renderSharing({ visibility: "invited" });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on relay" }));
-    expect(screen.getByText(/Suggested for Invited apps:/).textContent).toContain(
-      "Strict",
+  it("names Standard at every visibility, without applying it", async () => {
+    // This used to suggest Strict for Invited. Strict has no snapshot, so a
+    // Strict app dies with the laptop — and Invited is the common case, so the
+    // suggestion pointed most owners at the mode that turns off the thing the
+    // paid tier is bought for. See `suggestedFor` in relay.ts.
+    await openTheGate();
+    expect(screen.getByText(/Invited apps use/).textContent).toContain(
+      "Standard",
     );
 
     cleanup();
-    renderSharing({ visibility: "public" });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on relay" }));
-    expect(screen.getByText(/Suggested for Public apps:/).textContent).toContain(
+    await openTheGate({ visibility: "public" });
+    expect(screen.getByText(/Public apps use/).textContent).toContain(
       "Standard",
     );
   });
 
-  it("offers Strict but refuses to pretend it works", () => {
-    // Strict has no transport until C4. Quietly serving Standard in its place
-    // would hand the owner the mode where the operator *can* read the app,
-    // having just been told it cannot. Disabled, and said out loud.
-    renderSharing({ visibility: "invited" });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on relay" }));
+  it("does not draw a choice, because there is only one mode", async () => {
+    // Strict is deferred, so publishing has one answer. A radio pair with one
+    // working option is a choice drawn where none exists — the same fault the
+    // rest of this tab was built to remove. The modal is a confirmation of what
+    // publishing does instead, and it still says where the missing mode went.
+    await openTheGate();
 
-    const strict = screen.getByRole("button", { name: /Full privacy/ });
-    expect(strict.hasAttribute("disabled")).toBe(true);
-    expect(strict.textContent).toContain("no transport yet");
-
-    fireEvent.click(strict);
-    expect(invoke).not.toHaveBeenCalledWith(
-      "kt_call",
-      expect.objectContaining({ method: "share.set_relay" }),
+    expect(screen.queryByRole("button", { name: /Full privacy/ })).toBeNull();
+    expect(screen.getByText(/full-privacy mode/).textContent).toContain(
+      "designed and not built",
     );
+  });
+
+  it("shows one mode card once the relay is on, and it is not a control", () => {
+    // The block used to draw Standard and Strict side by side with radios, so
+    // an owner could switch. With one mode there is nothing to switch to, and a
+    // radio that cannot change anything is a lie about what you may do.
+    renderSharing({ visibility: "invited", relay: "standard" });
+
+    expect(screen.queryByRole("button", { name: /Full privacy/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Stay reachable/ }),
+    ).toBeNull();
+    expect(screen.getByText("Standard")).toBeTruthy();
   });
 
   it("turns the relay off in one click, with no second question", async () => {
