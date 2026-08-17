@@ -12,6 +12,7 @@ use kt_types::{AppManifest, AppRecord, RelayMode, StorageMode, Visibility};
 use notify::{RecursiveMode, Watcher};
 
 pub mod slug;
+pub mod workspace;
 
 /// How long to wait for the filesystem to settle before rescanning. Editors
 /// and agents write several files in a burst; rescanning per event would

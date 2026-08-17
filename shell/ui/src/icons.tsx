@@ -70,16 +70,9 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
-export function TeamIcon(props: IconProps) {
-  return (
-    <Svg {...props}>
-      <circle cx="9" cy="8" r="3" />
-      <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
-      <path d="M16 5.4a3 3 0 0 1 0 5.9" />
-      <path d="M18.5 19a5.5 5.5 0 0 0-3.2-5" />
-    </Svg>
-  );
-}
+// The mockup's TeamIcon lived here and is gone with the rail row it drew. Team
+// is a cloud feature (CLAUDE.md rule 10); an icon kept for a surface that must
+// not be built in this repo is an invitation to build it.
 
 /** A padlock: Private, and the "encrypted" badge. */
 export function LockIcon(props: IconProps) {

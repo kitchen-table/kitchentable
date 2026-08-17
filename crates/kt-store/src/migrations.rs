@@ -124,6 +124,28 @@ const MIGRATIONS: &[&str] = &[
     -- data from their own household.
     ALTER TABLE apps ADD COLUMN storage_backup INTEGER NOT NULL DEFAULT 1;
     "#,
+    // 8: daemon-level settings the owner chooses, as opposed to facts about an
+    // app.
+    //
+    // Key-value rather than a column per setting, because this table holds the
+    // handful of choices that have nowhere else to live and the shape of that
+    // handful is not settled. `apps` earned real columns by being queried; a
+    // settings row is read once at startup and written when somebody presses
+    // something, so a scan of five rows costs nothing.
+    //
+    // It lives here rather than in a file beside the database so that the
+    // daemon has one thing to open, and so a headless install - no shell, no
+    // window - reads the same choices the window wrote.
+    //
+    // Empty on migration. Every key absent means every default unchanged, which
+    // is what an upgrading install must mean.
+    r#"
+    CREATE TABLE settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    "#,
 ];
 
 /// The version a fresh database ends up at. Read by callers checking for a

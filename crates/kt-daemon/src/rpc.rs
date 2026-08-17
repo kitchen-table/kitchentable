@@ -20,6 +20,16 @@ pub struct Context {
     pub library: Arc<Library>,
     pub store: Arc<Store>,
     pub workspace: String,
+    /// Whether `KT_WORKSPACE` decided the workspace this run.
+    ///
+    /// Reported so Settings can draw the folder as fixed and say why. The
+    /// environment deliberately outranks the stored setting, so without this
+    /// the picker would appear to work, write a value nothing would ever read,
+    /// and change nothing after a restart.
+    pub workspace_locked: bool,
+    /// Kitchen Table's own directory, so a picked workspace can be checked
+    /// against it. The daemon is the only end that knows where this is.
+    pub state_dir: std::path::PathBuf,
     /// URL shape for this run, minus the per-app hostname, which comes from
     /// the library because only it knows what was actually announced.
     pub urls: Urls,
@@ -550,7 +560,47 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
                 relay_domain: identity.as_ref().map(|(_, d)| d.clone()),
                 relay: ctx.relay.get().into(),
                 uptime_secs: ctx.started.elapsed().as_secs() as u32,
+                workspace_locked: ctx.workspace_locked,
             })
+        }
+
+        // Choose the folder to watch.
+        //
+        // Validated and stored here rather than applied here. Swapping the
+        // watched tree in a running daemon means un-announcing every app,
+        // rescanning a new one and telling every subscriber that its whole
+        // library changed - a great deal of machinery for a setting somebody
+        // touches once. The daemon reads it on the next start instead, and the
+        // window says so rather than implying the change has landed.
+        //
+        // The validation cannot move to the shell: only the daemon knows where
+        // the state directory is, and only the daemon is the process that will
+        // have to write manifests into whatever gets picked.
+        "sys.set_workspace" => {
+            let picked = string_param(request, "path")?;
+
+            let path =
+                kt_registry::workspace::validate(std::path::Path::new(&picked), &ctx.state_dir)
+                    .map_err(|e| KtError {
+                        code: ErrorCode::BadRequest,
+                        message: e.to_string(),
+                        detail: None,
+                    })?;
+
+            let chosen = path.display().to_string();
+            ctx.store
+                .set_setting(crate::WORKSPACE_SETTING, &chosen)
+                .map_err(store_error)?;
+
+            tracing::info!(workspace = %chosen, "workspace setting written");
+
+            // `pending` is the honest half: this is what the daemon will watch
+            // next time, and `workspace` above is still what it is watching.
+            json(&serde_json::json!({
+                "workspace": ctx.workspace,
+                "pending": chosen,
+                "restart_required": chosen != ctx.workspace,
+            }))
         }
 
         // The socket layer notices this method and starts forwarding events on
@@ -1018,6 +1068,8 @@ mod tests {
             library,
             store: Arc::new(kt_store::Store::in_memory().expect("opens")),
             workspace: dir,
+            workspace_locked: false,
+            state_dir: std::path::PathBuf::from("/tmp/kt-state-not-used"),
             urls: Urls {
                 scheme: "http".into(),
                 hostname: None,
@@ -1186,6 +1238,103 @@ mod tests {
             )
             .code,
             ErrorCode::BadRequest
+        );
+    }
+
+    /// A scratch directory with a counter in the name. Two tests sharing one
+    /// path pass alone and fail together.
+    fn scratch(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kt-rpc-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("creates");
+        dir
+    }
+
+    #[test]
+    fn choosing_a_workspace_stores_it_and_says_a_restart_is_needed() {
+        // Stored rather than applied: swapping the watched tree in a running
+        // daemon is a great deal of machinery for a setting touched once, and
+        // the answer says so instead of implying the change has landed.
+        let ctx = context();
+        let picked = scratch("picked");
+        let req = request(
+            "sys.set_workspace",
+            Some(serde_json::json!({ "path": picked.display().to_string() })),
+        );
+
+        let answer = result(&ctx, &req);
+
+        let canonical = picked.canonicalize().expect("canonical");
+        assert_eq!(answer["pending"], canonical.display().to_string());
+        assert_eq!(answer["restart_required"], true);
+        assert_eq!(answer["workspace"], ctx.workspace);
+        assert_eq!(
+            ctx.store
+                .setting(crate::WORKSPACE_SETTING)
+                .expect("reads")
+                .as_deref(),
+            Some(canonical.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn a_repository_is_refused_as_a_workspace_and_nothing_is_stored() {
+        // The trap in the daemon's own history: every folder in a workspace
+        // gets an app.json written into it, so pointing it at a checkout means
+        // writing into somebody's source tree. A refusal that still wrote the
+        // setting would apply it on the next restart.
+        let ctx = context();
+        let repo = scratch("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("creates");
+        let req = request(
+            "sys.set_workspace",
+            Some(serde_json::json!({ "path": repo.display().to_string() })),
+        );
+
+        let error = error(&ctx, &req);
+
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(
+            error.message.contains("git repository"),
+            "the owner is standing in a file picker and needs the reason: {}",
+            error.message
+        );
+        assert_eq!(
+            ctx.store.setting(crate::WORKSPACE_SETTING).expect("reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_file_is_refused_as_a_workspace() {
+        let ctx = context();
+        let file = scratch("file").join("menu.pdf");
+        std::fs::write(&file, "%PDF").expect("writes");
+        let req = request(
+            "sys.set_workspace",
+            Some(serde_json::json!({ "path": file.display().to_string() })),
+        );
+
+        assert_eq!(error(&ctx, &req).code, ErrorCode::BadRequest);
+        assert_eq!(
+            ctx.store.setting(crate::WORKSPACE_SETTING).expect("reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn sys_status_says_whether_the_environment_fixed_the_workspace() {
+        // Without this the picker would appear to work, write a value the
+        // daemon will never read, and change nothing after a restart.
+        let ctx = context();
+        assert_eq!(
+            result(&ctx, &request("sys.status", None))["workspace_locked"],
+            false
         );
     }
 

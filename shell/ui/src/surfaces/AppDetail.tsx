@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { App } from "../generated";
 import { Qr } from "../Qr";
 import { type InviteView, Sharing } from "../Sharing";
-import { type AccessEvent, ago, describe, sentence, size } from "../activity";
+import { type AccessEvent, ago, describe, sentence, size, when } from "../activity";
 import { call, useStatus } from "../daemon";
 import { openInstead } from "../external";
 import { handover } from "../relay";
@@ -17,7 +17,8 @@ import { APP_TABS, APP_TAB_LABELS, type AppTab, type Surface } from "../navigati
 import { VISIBILITY, tileColour } from "../visibility";
 
 /**
- * One app, in depth: the six tabs from the desktop mockup.
+ * One app, in depth: five of the six tabs from the desktop mockup. Versions is
+ * deliberately absent - see `navigation.ts` for why.
  *
  * The header is shared by every tab so the app you are looking at, its URL and
  * its visibility never leave the screen - changing sharing is the most
@@ -132,7 +133,12 @@ export function AppDetail({
                 textOverflow: "ellipsis",
               }}
             >
-              {hand.url.replace(/^https?:\/\//, "")} · v{app.version} · {app.entry}
+              {/* The mockup reads "url · v7 · static + storage". The version is
+                  gone until something increments it: the registry stamps every
+                  generated manifest with 1 and nothing has ever moved it, so
+                  the segment was the same three characters on every app on the
+                  machine. */}
+              {hand.url.replace(/^https?:\/\//, "")} · {app.entry}
             </div>
           </div>
 
@@ -229,11 +235,6 @@ export function AppDetail({
         {tab === "devices" && <Devices />}
         {tab === "activity" && <AppActivity app={app} />}
         {tab === "storage" && <Storage app={app} />}
-        {tab === "versions" && (
-          <p style={{ font: "400 14px var(--font-sans)", color: "var(--faint)" }}>
-            {APP_TAB_LABELS[tab]} is not built yet.
-          </p>
-        )}
       </div>
     </div>
   );
@@ -343,13 +344,17 @@ function Overview({
             accent
           />
           <Stat value={String(opens)} label="total opens" />
-          {/* "v7", not "7": the version reads as a name everywhere else in the
-              product, and the label carries when it landed. */}
+          {/* The mockup's fourth tile is "v7 / deployed 12m ago", and both
+              halves were untrue. `version` is stamped 1 by the registry when it
+              generates a manifest and nothing increments it, so every app on
+              the machine read v1 forever; `deployed_at` is the folder's mtime,
+              so "deployed" meant "somebody saved a file". Nothing deploys here
+              - the workspace is a watched folder - so the tile now says the one
+              thing the daemon actually knows. It becomes a version again when
+              something creates one. */}
           <Stat
-            value={`v${app.version}`}
-            label={
-              app.deployed_at ? `deployed ${ago(app.deployed_at)} ago` : "current version"
-            }
+            value={app.deployed_at ? when(app.deployed_at) : "—"}
+            label="last changed"
           />
           <Stat value={size(app.size_bytes)} label="bundle size" />
         </div>

@@ -70,10 +70,10 @@ describe("AppDetail", () => {
 
     expect(screen.getByRole("heading", { name: "Trip Planner" })).toBeDefined();
     expect(screen.getByText("Invited")).toBeDefined();
-    expect(screen.getByText(/trip-planner\.local · v3/)).toBeDefined();
+    expect(screen.getByText(/trip-planner\.local · index\.html/)).toBeDefined();
   });
 
-  it("offers all six tabs and marks the current one", () => {
+  it("offers all five built tabs and marks the current one", () => {
     show({}, "sharing");
 
     const tabs = screen.getAllByRole("tab");
@@ -83,7 +83,6 @@ describe("AppDetail", () => {
       "Devices",
       "Activity",
       "Storage",
-      "Versions",
     ]);
     expect(screen.getByRole("tab", { name: "Sharing" }).getAttribute("aria-selected")).toBe("true");
   });
@@ -120,7 +119,7 @@ describe("AppDetail", () => {
     show({ public_url: "https://chester-adarsh.kitchentable.cloud" }, "devices");
 
     await waitFor(() =>
-      expect(screen.getByText(/chester-adarsh\.kitchentable\.cloud · v3/)).toBeDefined(),
+      expect(screen.getByText(/chester-adarsh\.kitchentable\.cloud · index\.html/)).toBeDefined(),
     );
   });
 
@@ -243,13 +242,41 @@ describe("AppDetail", () => {
     expect(text.indexOf("Live now")).toBeLessThan(text.indexOf("Recent activity"));
   });
 
-  it("names the version and says when it landed", () => {
-    // The mockup reads "v7 / deployed 12m ago". A bare "7" beside the word
-    // "changed" is neither the name nor the fact.
-    show({ version: 7, deployed_at: Math.floor(Date.now() / 1000) - 720 });
+  it("says when the folder last changed, and does not call it a deploy", () => {
+    // The mockup reads "v7 / deployed 12m ago" and neither half was true here:
+    // `version` is stamped 1 by the registry and never moves, and `deployed_at`
+    // is the folder's mtime. Nothing deploys - the workspace is a watched
+    // folder - so the tile reports the change and calls it one.
+    const { container } = show({
+      version: 7,
+      deployed_at: Math.floor(Date.now() / 1000) - 720,
+    });
 
-    expect(screen.getByText("v7")).toBeDefined();
-    expect(screen.getByText(/deployed 12m ago/)).toBeDefined();
+    expect(screen.getByText("12m ago")).toBeDefined();
+    expect(screen.getByText("last changed")).toBeDefined();
+    expect(container.textContent).not.toMatch(/deployed/i);
+    expect(container.textContent).not.toMatch(/\bv7\b/);
+  });
+
+  it("shows a dash rather than a guess when the filesystem will not say", () => {
+    // Some network mounts, and Linux before 4.11. "just now" would be a
+    // fabrication about somebody's folder.
+    show({ deployed_at: undefined });
+
+    // Scoped to the tile: a dash also stands for "presence has not answered
+    // yet" two tiles along, and asserting on the character alone would pass
+    // whichever of them rendered.
+    const tile = screen.getByText("last changed").parentElement;
+    expect(tile?.textContent).toBe("—last changed");
+  });
+
+  it("has no Versions tab, because nothing creates a version", () => {
+    // The mockup draws six. The sixth could only ever be empty: there is no
+    // deploy, no app.write_file and no kt deploy, so the tab is absent rather
+    // than present-and-lying. Delete this test when something writes a version.
+    show();
+
+    expect(screen.queryByRole("tab", { name: "Versions" })).toBeNull();
   });
 
   it("says who did each thing in the activity list, not just what happened", () => {

@@ -8,7 +8,11 @@
     "opener:default",
     {
       "identifier": "dialog:allow-open",
-      "comment": "The folder picker behind 'Add an app'. Open only - the shell never saves, asks or confirms through a native dialog."
+      "comment": "The folder picker behind 'Add an app' and behind Settings > Watched folder. Open only - the shell never saves, asks or confirms through a native dialog."
+    },
+    {
+      "identifier": "autostart:default",
+      "comment": "Settings > Start Kitchen Table at login. Enable, disable and read back - the last one matters, because a toggle that cannot check itself would draw the owner's setting from memory and be wrong after any change made outside the app."
     }
   ]
 }

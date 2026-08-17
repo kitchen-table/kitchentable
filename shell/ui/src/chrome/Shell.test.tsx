@@ -202,4 +202,25 @@ describe("Shell", () => {
     expect(screen.getByText("everything across your workspace")).toBeDefined();
     await waitFor(() => expect(screen.queryByText(/not built yet/)).toBeNull());
   });
+
+  it("lands the rail's Settings on the real surface", () => {
+    show();
+    fireEvent.click(screen.getByRole("button", { name: /^Settings/ }));
+
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Workspace" })).toBeDefined();
+    expect(screen.getByText("Watched folder")).toBeDefined();
+    expect(screen.queryByText(/not built yet/)).toBeNull();
+  });
+
+  it("has no Team row, and every row it does have goes somewhere", () => {
+    // Team rendered and did nothing. Its server half is a cloud feature that
+    // must not be built in this repo (CLAUDE.md rule 10), so there was never
+    // going to be anything behind the row - and a row is a promise of a place.
+    // Settings' relay card describes the paid tier instead.
+    const { container } = show();
+
+    expect(screen.queryByRole("button", { name: /^Team/ })).toBeNull();
+    expect(container.textContent).not.toMatch(/not built yet/);
+  });
 });
