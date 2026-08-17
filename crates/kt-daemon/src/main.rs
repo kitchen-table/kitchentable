@@ -84,16 +84,14 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), StartupError> {
     let home = paths::home().map_err(|_| StartupError::NoHome)?;
 
-    // Overridable so tests and a second developer instance can run without
-    // fighting over the real workspace.
-    let workspace = std::env::var("KT_WORKSPACE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| paths::default_workspace(&home));
+    // Opened before the workspace is resolved, because the owner's choice of
+    // workspace lives in it.
+    let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
+
+    let (workspace, workspace_locked) = resolve_workspace(&home, &store);
 
     let registry = Registry::new(&workspace);
     registry.ensure_workspace()?;
-
-    let store = Arc::new(Store::open(&paths::system_db_path(&home))?);
     // Each app's own key-value store, one SQLite file each. Shared between the
     // HTTP layer, which apps write through, and the socket, which reads them
     // back for the owner's Storage tab.
@@ -222,6 +220,8 @@ async fn run() -> Result<(), StartupError> {
         library: Arc::clone(&library),
         store: Arc::clone(&store),
         workspace: workspace.display().to_string(),
+        workspace_locked,
+        state_dir: paths::state_dir(&home),
         urls: urls.clone(),
         serving,
         started: Instant::now(),
@@ -453,6 +453,58 @@ fn sync_with(
             events.send(Event::AppRemoved { slug });
         }
     }
+}
+
+/// The settings key holding the folder the owner picked.
+pub const WORKSPACE_SETTING: &str = "workspace";
+
+/// Which folder to watch, and whether the owner is allowed to change it.
+///
+/// Three sources in a fixed order - **environment, then setting, then default**
+/// - and the order is the whole design:
+///
+/// - `KT_WORKSPACE` wins because it is how the e2e suite, a second developer
+///   instance and a scripted run each get their own workspace without touching
+///   a database shared with the owner's real daemon. A stored setting that
+///   could override it would make those runs depend on whatever the last
+///   person pressed in Settings.
+/// - The stored setting is next, so a choice made in the window survives a
+///   restart and is read the same way by a headless daemon that has no window.
+/// - The default, `~/KitchenTable`, is what an install that has never chosen
+///   has always used.
+///
+/// The second return value says the environment won, which `sys.status` passes
+/// to the window so Settings can draw the folder as fixed and say why. Without
+/// it the picker would appear to work, write a setting, restart, and change
+/// nothing - which is exactly the shape of bug this codebase keeps finding.
+///
+/// A stored folder that has gone - an unplugged drive, a folder deleted in
+/// Finder - falls back to the default rather than refusing to start. Serving
+/// nothing is worse than serving the default, and the log says which happened.
+fn resolve_workspace(home: &str, store: &Store) -> (std::path::PathBuf, bool) {
+    if let Ok(from_env) = std::env::var("KT_WORKSPACE") {
+        tracing::info!(workspace = %from_env, "workspace set by KT_WORKSPACE");
+        return (std::path::PathBuf::from(from_env), true);
+    }
+
+    match store.setting(WORKSPACE_SETTING) {
+        Ok(Some(chosen)) => {
+            let path = std::path::PathBuf::from(&chosen);
+            if path.is_dir() {
+                tracing::info!(workspace = %chosen, "workspace chosen in Settings");
+                return (path, false);
+            }
+            tracing::warn!(
+                workspace = %chosen,
+                "the chosen workspace is not there; falling back to the default"
+            );
+        }
+        Ok(None) => {}
+        // A database that will not answer is not a reason to serve nothing.
+        Err(e) => tracing::warn!(error = %e, "could not read the workspace setting"),
+    }
+
+    (paths::default_workspace(home), false)
 }
 
 /// Enough of an app to tell "nothing moved" from "something the window should

@@ -221,6 +221,8 @@ mod tests {
             library: Arc::new(crate::library::Library::new()),
             store: Arc::new(kt_store::Store::in_memory().expect("opens")),
             workspace: "/tmp/ws".into(),
+            workspace_locked: false,
+            state_dir: std::path::PathBuf::from("/tmp/kt-state-not-used"),
             urls: kt_types::Urls {
                 scheme: "http".into(),
                 hostname: None,

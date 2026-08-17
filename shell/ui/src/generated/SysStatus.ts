@@ -43,4 +43,13 @@ relay: RelayState,
  * ts-rs maps 64-bit integers to `bigint`, which JSON cannot carry - and
  * 136 years of uptime is enough.
  */
-uptime_secs: number, };
+uptime_secs: number, 
+/**
+ * Whether `KT_WORKSPACE` fixed the workspace for this run.
+ *
+ * True means Settings must draw the folder as unchangeable and say why:
+ * the environment outranks the stored setting deliberately, so a picker
+ * offered here would write a value the daemon will never read and appear
+ * to do nothing after a restart.
+ */
+workspace_locked: boolean, };

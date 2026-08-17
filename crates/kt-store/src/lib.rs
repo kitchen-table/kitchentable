@@ -207,6 +207,41 @@ impl Store {
         Ok(removed)
     }
 
+    /// A daemon-level choice the owner made, or `None` if they never made one.
+    ///
+    /// `None` is the answer that matters: it means "unchanged", and every
+    /// caller is expected to fall back to its own default rather than treat a
+    /// missing row as an error. An install that has never opened Settings has
+    /// an empty table and must behave exactly as it did before the table
+    /// existed.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record a choice, replacing whatever was there.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, strftime('%s','now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a choice, so the default applies again.
+    pub fn clear_setting(&self, key: &str) -> Result<(), StoreError> {
+        self.lock()
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// A poisoned mutex means a previous caller panicked mid-statement; the
     /// connection itself is still sound, so recovering beats taking the process
     /// down.
@@ -340,6 +375,51 @@ mod tests {
     fn a_fresh_database_is_at_the_latest_migration() {
         let store = Store::in_memory().expect("opens");
         assert_eq!(store.schema_version().expect("reads"), migrations::LATEST);
+    }
+
+    #[test]
+    fn an_unset_setting_is_none_rather_than_an_error() {
+        // The distinction the callers depend on: absent means "unchanged, use
+        // your default", and an install that has never opened Settings has to
+        // behave exactly as it did before the table existed.
+        let store = Store::in_memory().expect("opens");
+        assert_eq!(store.setting("workspace").expect("reads"), None);
+    }
+
+    #[test]
+    fn a_setting_can_be_written_replaced_and_cleared() {
+        let store = Store::in_memory().expect("opens");
+
+        store
+            .set_setting("workspace", "/Users/a/Apps")
+            .expect("writes");
+        assert_eq!(
+            store.setting("workspace").expect("reads").as_deref(),
+            Some("/Users/a/Apps")
+        );
+
+        // Replacing, not accumulating: the second choice is the choice.
+        store
+            .set_setting("workspace", "/Users/a/Other")
+            .expect("writes");
+        assert_eq!(
+            store.setting("workspace").expect("reads").as_deref(),
+            Some("/Users/a/Other")
+        );
+
+        store.clear_setting("workspace").expect("clears");
+        assert_eq!(store.setting("workspace").expect("reads"), None);
+    }
+
+    #[test]
+    fn settings_do_not_collide_with_each_other() {
+        let store = Store::in_memory().expect("opens");
+        store.set_setting("workspace", "/a").expect("writes");
+        store.set_setting("something-else", "/b").expect("writes");
+        assert_eq!(
+            store.setting("workspace").expect("reads").as_deref(),
+            Some("/a")
+        );
     }
 
     #[test]
