@@ -603,6 +603,64 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             }))
         }
 
+        // Which desktop notifications the owner wants.
+        //
+        // Here rather than in the shell because the daemon is the process that
+        // outlives every window: an owner who turned access requests off has
+        // said something about their machine, not about a webview, and an
+        // update that replaces the shell must not quietly turn them back on.
+        "notify.prefs" => json(&notify_prefs(ctx)?),
+
+        "notify.set_prefs" => {
+            let patch = request
+                .params
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let prefs = notify_prefs(ctx)?.merge(&patch);
+
+            ctx.store
+                .set_setting(NOTIFY_SETTING, &json(&prefs)?.to_string())
+                .map_err(store_error)?;
+
+            // The whole object back, not an acknowledgement: a caller that sent
+            // one switch still has to draw the other three, and reading them
+            // from what it sent would be reading its own guess.
+            json(&prefs)
+        }
+
+        // How far the owner has read, as a timestamp.
+        //
+        // A watermark rather than a flag per row, because the thing being read
+        // is the access log, and the access log is append-only by design - a
+        // read flag would mean writing to rows that answer "who has seen this",
+        // which is exactly the file that has to stay untouched. One number also
+        // survives the log being trimmed.
+        //
+        // Zero for an install that has never opened the surface. Everything
+        // then reads as unread, which is the right way round: the alternative
+        // marks a device that asked while nobody was looking as already seen.
+        "notify.seen" => json(&serde_json::json!({ "at": notify_seen(ctx)? })),
+
+        "notify.mark_seen" => {
+            // The caller's own timestamp, when it has one: it read a list it
+            // had already fetched, and anything logged since that fetch has not
+            // been seen by anybody. Marking `now` here would swallow it.
+            let at = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("at"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_else(now);
+
+            // Never backwards. Two windows on one daemon would otherwise let
+            // the slower one reopen everything the other had just read.
+            let at = at.max(notify_seen(ctx)?);
+            ctx.store
+                .set_setting(SEEN_SETTING, &at.to_string())
+                .map_err(store_error)?;
+            json(&serde_json::json!({ "at": at }))
+        }
+
         // The socket layer notices this method and starts forwarding events on
         // the connection; the answer here is only the acknowledgement, so a
         // caller knows subscribing worked rather than inferring it from silence.
@@ -686,6 +744,41 @@ fn not_found(slug: &str) -> KtError {
         message: format!("no app with slug {slug:?}"),
         detail: None,
     }
+}
+
+/// Where [`kt_types::NotifyPrefs`] is kept in the settings table.
+const NOTIFY_SETTING: &str = "notifications";
+
+/// Where the notifications read-watermark is kept. Unix seconds.
+const SEEN_SETTING: &str = "notifications_seen_at";
+
+/// How far the owner has read. Zero if they never have.
+fn notify_seen(ctx: &Context) -> Result<i64, KtError> {
+    Ok(ctx
+        .store
+        .setting(SEEN_SETTING)
+        .map_err(store_error)?
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(0))
+}
+
+/// The stored notification switches, or the defaults.
+///
+/// Unreadable JSON falls back to the defaults rather than failing the call. The
+/// only way to get a bad value in there is a downgrade or somebody editing the
+/// database by hand, and in both cases refusing to answer would take the
+/// Notifications surface down over four booleans. The next write repairs it.
+fn notify_prefs(ctx: &Context) -> Result<kt_types::NotifyPrefs, KtError> {
+    let stored = ctx.store.setting(NOTIFY_SETTING).map_err(store_error)?;
+    Ok(stored
+        .and_then(|raw| match serde_json::from_str(&raw) {
+            Ok(prefs) => Some(prefs),
+            Err(e) => {
+                tracing::warn!(error = %e, "unreadable notification settings; using the defaults");
+                None
+            }
+        })
+        .unwrap_or_default())
 }
 
 fn store_error(e: kt_store::StoreError) -> KtError {
@@ -1844,6 +1937,72 @@ mod tests {
         );
         assert_eq!(events.as_array().expect("array").len(), 3);
         assert_eq!(events[0]["action"], "opened");
+    }
+
+    #[test]
+    fn notification_settings_start_at_the_defaults() {
+        let ctx = context();
+        let prefs = result(&ctx, &request("notify.prefs", None));
+
+        // An install that has never opened the Notifications surface must
+        // still get the banner that matters.
+        assert_eq!(prefs["requests"], true);
+        assert_eq!(prefs["opens"], false);
+    }
+
+    #[test]
+    fn moving_one_notification_switch_leaves_the_others_alone() {
+        let ctx = context();
+        let saved = result(
+            &ctx,
+            &request(
+                "notify.set_prefs",
+                Some(serde_json::json!({ "opens": true })),
+            ),
+        );
+        assert_eq!(saved["opens"], true);
+        assert_eq!(saved["requests"], true);
+
+        // And it survives, because the daemon outlives the window that set it.
+        let read_back = result(&ctx, &request("notify.prefs", None));
+        assert_eq!(read_back["opens"], true);
+    }
+
+    #[test]
+    fn unreadable_notification_settings_fall_back_to_the_defaults() {
+        let ctx = context();
+        ctx.store
+            .set_setting(NOTIFY_SETTING, "{not json")
+            .expect("writes");
+
+        // Better a working surface with the defaults than a Notifications tab
+        // that will not load because of four booleans.
+        let prefs = result(&ctx, &request("notify.prefs", None));
+        assert_eq!(prefs["requests"], true);
+    }
+
+    #[test]
+    fn nothing_is_read_until_somebody_reads_it() {
+        let ctx = context();
+        assert_eq!(result(&ctx, &request("notify.seen", None))["at"], 0);
+    }
+
+    #[test]
+    fn the_read_mark_never_moves_backwards() {
+        let ctx = context();
+        result(
+            &ctx,
+            &request("notify.mark_seen", Some(serde_json::json!({ "at": 2_000 }))),
+        );
+
+        // A second window, slower and further behind, must not un-read what
+        // the first one just read.
+        let answer = result(
+            &ctx,
+            &request("notify.mark_seen", Some(serde_json::json!({ "at": 1_000 }))),
+        );
+        assert_eq!(answer["at"], 2_000);
+        assert_eq!(result(&ctx, &request("notify.seen", None))["at"], 2_000);
     }
 
     #[test]

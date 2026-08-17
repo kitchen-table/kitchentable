@@ -534,7 +534,8 @@ function TextButton({
   );
 }
 
-function Switch({
+/** Exported for the Notifications surface, which draws four of them. */
+export function Switch({
   label,
   on,
   disabled,

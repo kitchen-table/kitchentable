@@ -6,6 +6,7 @@ export type { DegradedReason } from "./DegradedReason";
 export type { ErrorCode } from "./ErrorCode";
 export type { Event } from "./Event";
 export type { KtError } from "./KtError";
+export type { NotifyPrefs } from "./NotifyPrefs";
 export type { RelayMode } from "./RelayMode";
 export type { RelayState } from "./RelayState";
 export type { ServingState } from "./ServingState";

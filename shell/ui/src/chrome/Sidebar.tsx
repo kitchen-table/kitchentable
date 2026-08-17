@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Visibility } from "../generated";
 import {
   ActivityIcon,
+  BellIcon,
   ChevronUpIcon,
   InvitedIcon,
   LibraryIcon,
@@ -37,6 +38,7 @@ export function Sidebar({
   onNavigate,
   total,
   counts,
+  pending,
   mcp,
   onQuit,
 }: {
@@ -44,6 +46,8 @@ export function Sidebar({
   onNavigate: (surface: Surface) => void;
   total: number;
   counts: Partial<Record<Visibility, number>>;
+  /** Devices waiting for a decision. Drives the rail's red count. */
+  pending: number;
   mcp?: McpStatus;
   onQuit: () => void;
 }) {
@@ -75,6 +79,13 @@ export function Sidebar({
         label="Activity"
         active={section === "activity"}
         onClick={() => onNavigate({ kind: "activity" })}
+      />
+      <NavRow
+        icon={<BellIcon />}
+        label="Notifications"
+        waiting={pending}
+        active={section === "notifications"}
+        onClick={() => onNavigate({ kind: "notifications" })}
       />
       <NavRow
         icon={<SettingsIcon />}
@@ -440,6 +451,7 @@ function NavRow({
   label,
   count,
   badge,
+  waiting,
   active,
   onClick,
 }: {
@@ -447,6 +459,8 @@ function NavRow({
   label: string;
   count?: number;
   badge?: string;
+  /** A count that needs an answer, drawn red. Absent or zero draws nothing. */
+  waiting?: number;
   active: boolean;
   onClick: () => void;
 }) {
@@ -480,6 +494,25 @@ function NavRow({
           }}
         >
           {count}
+        </span>
+      )}
+      {waiting !== undefined && waiting > 0 && (
+        <span
+          style={{
+            marginLeft: "auto",
+            font: "700 10px var(--font-mono)",
+            color: "#fff",
+            background: "var(--danger)",
+            minWidth: 18,
+            height: 18,
+            borderRadius: 9,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 5px",
+          }}
+        >
+          {waiting}
         </span>
       )}
       {badge && (

@@ -14,6 +14,8 @@ use tauri::{
 };
 
 mod daemon;
+mod localnet;
+mod notify;
 mod socket;
 
 use daemon::Supervisor;
@@ -207,7 +209,11 @@ pub fn run() {
             kt_call,
             kt_health,
             kt_restart_daemon,
-            kt_quit
+            kt_quit,
+            notify::kt_notify_state,
+            notify::kt_notify_request,
+            notify::kt_notify,
+            localnet::kt_local_network
         ])
         .setup(move |app| {
             build_tray(app.handle())?;
@@ -222,6 +228,15 @@ pub fn run() {
             });
 
             forward_events(app.handle().clone());
+
+            // Said once at startup, because it is the first thing to check when
+            // somebody reports that no banner appeared: a development build,
+            // a refusal, or banners switched off all look identical from the
+            // outside, and the window is the wrong place to find that out from
+            // a bug report.
+            std::thread::spawn(
+                || tracing::info!(state = %notify::kt_notify_state(), "notifications"),
+            );
 
             tracing::info!("shell started");
             Ok(())

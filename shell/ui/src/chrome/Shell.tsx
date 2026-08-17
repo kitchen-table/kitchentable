@@ -4,12 +4,14 @@ import { Library } from "../Library";
 import { StatusBar } from "../StatusBar";
 import { WorkspaceActivity } from "../surfaces/Activity";
 import { AppDetail } from "../surfaces/AppDetail";
+import { Notifications } from "../surfaces/Notifications";
 import { Settings } from "../surfaces/Settings";
 import { quit } from "../daemon";
 import { useAddApp, useFolderDrop } from "../addApp";
 import { pending as pendingDevices, useDevices } from "../devices";
 import { useDaemonEvents } from "../events";
-import { LIBRARY, type Surface } from "../navigation";
+import { LIBRARY, NOTIFICATIONS, type Surface } from "../navigation";
+import { useDesktopNotifications, useNotifyPrefs } from "../notify";
 import { type Appearance, useAppearance } from "../theme";
 import { NewAppModal } from "./NewAppModal";
 import { PairingModal } from "./PairingModal";
@@ -43,6 +45,13 @@ export function Shell({
   // Mounted here rather than per-surface: an event that arrives while the
   // Devices tab is closed still has to reach the pairing prompt.
   useDaemonEvents();
+
+  // And the desktop, which is the case that matters most: the window is
+  // usually hidden when a device asks, and a banner is the only thing anybody
+  // will see. Mounted once for the same reason - a surface that is closed
+  // cannot post a notification about the event it never received.
+  const prefs = useNotifyPrefs();
+  useDesktopNotifications(prefs.data);
 
   const devices = useDevices();
   const waiting = pendingDevices(devices.data);
@@ -98,13 +107,11 @@ export function Shell({
         query={query}
         onQuery={setQuery}
         pending={waiting.length}
-        onPending={() =>
-          // Straight to where the decision is made. Falls back to the library
-          // when there is nothing waiting and no app to hang the tab off.
-          apps[0]
-            ? setSurface({ kind: "app", slug: apps[0].slug, tab: "devices" })
-            : setSurface(LIBRARY)
-        }
+        // Straight to the surface built for it. This used to guess at an app
+        // and open its Devices tab, which was wrong twice over: devices are
+        // trusted across the whole workspace, not per app, and with no apps at
+        // all it dropped you in the library with no explanation.
+        onPending={() => setSurface(NOTIFICATIONS)}
         dark={dark}
         onToggleTheme={toggle}
         onNewApp={() => setNewApp(true)}
@@ -116,6 +123,7 @@ export function Shell({
           onNavigate={setSurface}
           total={apps.length}
           counts={counts}
+          pending={waiting.length}
           mcp={mcp}
           onQuit={() => void quit()}
         />
@@ -296,6 +304,9 @@ function Content({
 
     case "activity":
       return <WorkspaceActivity apps={apps} onNavigate={onNavigate} />;
+
+    case "notifications":
+      return <Notifications />;
 
     case "settings":
       return (

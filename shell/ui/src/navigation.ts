@@ -46,6 +46,7 @@ export type Surface =
   | { kind: "library"; filter: Visibility | null }
   | { kind: "app"; slug: string; tab: AppTab }
   | { kind: "activity" }
+  | { kind: "notifications" }
   | { kind: "settings" };
 
 export const LIBRARY: Surface = { kind: "library", filter: null };
@@ -63,8 +64,12 @@ export function appSurface(slug: string, tab: AppTab = "overview"): Surface {
  * that says what the tier is, and nothing anywhere that looks live and is not.
  */
 
+export const NOTIFICATIONS: Surface = { kind: "notifications" };
+
 /** Which sidebar row should read as selected for a given surface. */
-export function navSection(surface: Surface): "library" | "activity" | "settings" {
+export function navSection(
+  surface: Surface,
+): "library" | "activity" | "notifications" | "settings" {
   switch (surface.kind) {
     // An app's detail view is still the library as far as the rail is
     // concerned; the app header carries its own "← Library" way out.

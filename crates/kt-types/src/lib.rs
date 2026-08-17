@@ -22,6 +22,7 @@
 
 pub mod app;
 pub mod event;
+pub mod notify;
 pub mod paths;
 pub mod protocol;
 pub mod status;
@@ -31,5 +32,6 @@ pub use app::{
     Urls, Visibility, MAX_DNS_LABEL,
 };
 pub use event::{Event, Viewer};
+pub use notify::NotifyPrefs;
 pub use protocol::{ErrorCode, KtError, Request, Response, PROTOCOL_VERSION};
 pub use status::{DegradedReason, RelayState, ServingState, SysStatus};

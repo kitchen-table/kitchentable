@@ -11,6 +11,22 @@
       "comment": "The folder picker behind 'Add an app' and behind Settings > Watched folder. Open only - the shell never saves, asks or confirms through a native dialog."
     },
     {
+      "identifier": "core:window:allow-set-size",
+      "comment": "Onboarding is a 960x640 panel and the app is a 1240x820 workspace; the window becomes each in turn. See ui/src/windowSize.ts."
+    },
+    {
+      "identifier": "core:window:allow-set-min-size",
+      "comment": "The app's floor would otherwise clamp the smaller onboarding panel, and has to come back when onboarding ends."
+    },
+    {
+      "identifier": "core:window:allow-set-resizable",
+      "comment": "Onboarding is fixed: its column has one width, so dragging it wider only makes a shape it was never drawn at."
+    },
+    {
+      "identifier": "core:window:allow-center",
+      "comment": "A window that changes size around a fixed top-left corner walks across the screen. Centring is what makes the change read as one window changing shape."
+    },
+    {
       "identifier": "autostart:default",
       "comment": "Settings > Start Kitchen Table at login. Enable, disable and read back - the last one matters, because a toggle that cannot check itself would draw the owner's setting from memory and be wrong after any change made outside the app."
     }
