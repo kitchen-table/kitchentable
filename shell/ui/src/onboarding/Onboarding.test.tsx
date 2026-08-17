@@ -2,9 +2,10 @@ import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import * as dialog from "@tauri-apps/plugin-dialog";
-import { vi } from "vitest";
+import { describe, vi } from "vitest";
 import { Onboarding } from "./Onboarding";
-import { isComplete, reset } from "./steps";
+import { showcase } from "./Screens";
+import { STEPS, isComplete, reset } from "./steps";
 import type { App, SysStatus } from "../generated";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -82,7 +83,7 @@ const welcomeApp: App = {
 /// rather than counting clicks means these tests say which screen they mean.
 function goToStep(n: number) {
   for (let guard = 0; guard < 12; guard++) {
-    if (screen.queryByText(`Step ${n} of 8`)) return;
+    if (screen.queryByText(`Step ${n} of ${STEPS.length}`)) return;
     const next =
       screen.queryByRole("button", { name: "Get started" }) ??
       screen.getByRole("button", { name: /Continue|Finish/ });
@@ -101,12 +102,12 @@ describe("Onboarding", () => {
     ).toBeDefined();
   });
 
-  it("walks through all eight steps and finishes", () => {
+  it("walks through all nine steps and finishes", () => {
     const onDone = vi.fn();
     render(<Onboarding apps={[welcomeApp]} status={status()} onDone={onDone} />);
 
-    expect(screen.getByText("Step 1 of 8")).toBeDefined();
-    goToStep(8);
+    expect(screen.getByText(`Step 1 of ${STEPS.length}`)).toBeDefined();
+    goToStep(STEPS.length);
 
     fireEvent.click(screen.getByRole("button", { name: "Finish" }));
     expect(onDone).toHaveBeenCalled();
@@ -275,7 +276,7 @@ describe("Onboarding", () => {
     }) as typeof invoke);
 
     render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
-    goToStep(5);
+    goToStep(6);
 
     await waitFor(() => expect(screen.getByText(/iPhone wants to open/)).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Approve & pair" }));
@@ -288,10 +289,92 @@ describe("Onboarding", () => {
     );
   });
 
+  it("asks for notification permission on its own step, before pairing", async () => {
+    // The banner is how an access request gets answered with the window shut,
+    // so the ask comes immediately before the step that produces one.
+    vi.mocked(invoke).mockImplementation(((cmd: string) =>
+      cmd === "kt_notify_state"
+        ? Promise.resolve({ state: "not_determined", alerts: false })
+        : Promise.resolve([])) as typeof invoke);
+
+    render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
+    goToStep(5);
+
+    expect(screen.getByRole("heading", { name: "Know when someone knocks" })).toBeDefined();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Enable notifications" })).toBeDefined(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable notifications" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("kt_notify_request"));
+  });
+
+  it("says notifications are on once macOS has agreed", async () => {
+    vi.mocked(invoke).mockImplementation(((cmd: string) =>
+      cmd === "kt_notify_state"
+        ? Promise.resolve({ state: "granted", alerts: true })
+        : Promise.resolve([])) as typeof invoke);
+
+    render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
+    goToStep(5);
+
+    await waitFor(() => expect(screen.getByText("Notifications on")).toBeDefined());
+    // Nothing left to press: macOS asks once and remembers.
+    expect(screen.queryByRole("button", { name: "Enable notifications" })).toBeNull();
+  });
+
+  it("explains what a refusal costs without pretending it broke anything", async () => {
+    vi.mocked(invoke).mockImplementation(((cmd: string) =>
+      cmd === "kt_notify_state"
+        ? Promise.resolve({ state: "denied", alerts: false })
+        : Promise.resolve([])) as typeof invoke);
+
+    render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
+    goToStep(5);
+
+    await waitFor(() =>
+      expect(screen.getByText(/won’t get pop-ups for access requests/)).toBeDefined(),
+    );
+    expect(screen.getByText(/still appear as a badge/)).toBeDefined();
+    expect(screen.getByRole("button", { name: "try again" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Enable notifications" })).toBeNull();
+  });
+
+  it("says so when the phone is in, instead of falling back to waiting", async () => {
+    // Approving made the request card vanish - correctly, nothing was pending
+    // any more - and the step then read as though the phone had never arrived.
+    vi.mocked(invoke).mockImplementation(((cmd: string, args?: unknown) => {
+      const method = (args as { method?: string } | undefined)?.method;
+      if (cmd === "kt_call" && method === "device.list") {
+        return Promise.resolve([
+          {
+            id: "dev-1",
+            name: "Adarsh's iPhone",
+            status: "approved",
+            named_by: "owner",
+            user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0) Safari/605.1",
+            fingerprint: "f3:9a:21",
+            first_seen: 1_760_000_000,
+            last_seen: 1_760_000_100,
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    }) as typeof invoke);
+
+    render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
+    goToStep(6);
+
+    await waitFor(() => expect(screen.getByText("Paired! 🎉")).toBeDefined());
+    // Named in the sentence and again on the device row.
+    expect(screen.getAllByText(/Adarsh's iPhone/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Waiting for a device")).toBeNull();
+  });
+
   it("says it is waiting rather than drawing a device that does not exist", async () => {
     vi.mocked(invoke).mockResolvedValue([]);
     render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
-    goToStep(5);
+    goToStep(6);
 
     await waitFor(() => expect(screen.getByText("Waiting for a device")).toBeDefined());
     expect(screen.queryByRole("button", { name: "Approve & pair" })).toBeNull();
@@ -299,7 +382,7 @@ describe("Onboarding", () => {
 
   it("offers the launch-at-login choice where the flow promises it", async () => {
     render(<Onboarding apps={[]} status={status()} onDone={() => {}} />);
-    goToStep(6);
+    goToStep(7);
 
     // The step promises that closing the window keeps serving; across a
     // restart that is only true with this on.
@@ -324,7 +407,7 @@ describe("Onboarding", () => {
 
   it("says nothing is shared until you say so", () => {
     render(<Onboarding apps={[welcomeApp]} status={status()} onDone={() => {}} />);
-    goToStep(5);
+    goToStep(6);
     expect(screen.getByText(/Every app starts Private/)).toBeDefined();
   });
 
@@ -334,7 +417,7 @@ describe("Onboarding", () => {
     goToStep(4);
     expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
 
-    goToStep(7);
+    goToStep(8);
     expect(screen.getByRole("button", { name: "Skip" })).toBeDefined();
   });
 
@@ -343,12 +426,38 @@ describe("Onboarding", () => {
     goToStep(3);
 
     fireEvent.click(screen.getByRole("button", { name: "← Back" }));
-    expect(screen.getByText("Step 2 of 8")).toBeDefined();
+    expect(screen.getByText(`Step 2 of ${STEPS.length}`)).toBeDefined();
   });
 
   it("is not marked done until it is finished", () => {
     render(<Onboarding apps={[]} status={status()} onDone={() => {}} />);
-    goToStep(5);
+    goToStep(6);
     expect(isComplete()).toBe(false);
+  });
+});
+
+describe("which app onboarding shows", () => {
+  const unservable: App = { ...welcomeApp, slug: "cloud", name: "cloud", entry_exists: false };
+  const sample: App = { ...welcomeApp, slug: "welcome", name: "Welcome" };
+
+  it("skips a folder with nothing to serve", () => {
+    // The bug: a workspace that is a code directory registered its
+    // subfolders, and step 4 drew a QR code pointing at a 404.
+    expect(showcase([unservable, sample])?.slug).toBe("welcome");
+  });
+
+  it("prefers the sample app even when another would serve", () => {
+    const other: App = { ...welcomeApp, slug: "notes", name: "Notes" };
+    expect(showcase([other, sample])?.slug).toBe("welcome");
+  });
+
+  it("falls back to anything servable when there is no sample", () => {
+    const other: App = { ...welcomeApp, slug: "notes", name: "Notes" };
+    expect(showcase([unservable, other])?.slug).toBe("notes");
+  });
+
+  it("names something real rather than nothing when none can be served", () => {
+    expect(showcase([unservable])?.slug).toBe("cloud");
+    expect(showcase([])).toBeUndefined();
   });
 });

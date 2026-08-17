@@ -6,17 +6,41 @@ import { call, restartDaemon } from "../daemon";
 import {
   type Device,
   describeAgent,
+  deviceShape,
   pending as pendingDevices,
   useDeviceActions,
   useDevices,
 } from "../devices";
 import type { App, SysStatus } from "../generated";
-import { FolderIcon } from "../icons";
+import { DeviceShapeIcon, FolderIcon } from "../icons";
 import { useLaunchAtLogin } from "../launchAtLogin";
 import { useLocalNetwork } from "../localnet";
+import { useAskPermission, useNotifyState } from "../notify";
 import { Qr } from "../Qr";
 import { Switch } from "../surfaces/Settings";
 import type { Step } from "./steps";
+
+/**
+ * The app onboarding should point a camera at.
+ *
+ * Not simply the first one. A workspace can contain folders that are not apps
+ * in any useful sense - the daemon registers any directory, and one without an
+ * `index.html` serves a 404 - so the first folder alphabetically is a QR code
+ * pointing at nothing, which is exactly what onboarding did on a machine whose
+ * workspace was a code directory.
+ *
+ * The sample app first, because it is the one the flow is written around and
+ * the one whose visibility invites the pairing step. Then anything that can
+ * actually be served. Only then the first of whatever is left, which at least
+ * names something real.
+ */
+export function showcase(apps: App[]): App | undefined {
+  return (
+    apps.find((app) => app.slug === "welcome" && app.entry_exists) ??
+    apps.find((app) => app.entry_exists) ??
+    apps[0]
+  );
+}
 
 /** The body of each step. */
 export function Screens({
@@ -39,6 +63,8 @@ export function Screens({
       return <Network status={status} />;
     case "first-app":
       return <FirstApp apps={apps} />;
+    case "notifications":
+      return <Notifications apps={apps} />;
     case "pair":
       return <Pair apps={apps} />;
     case "ready":
@@ -441,7 +467,7 @@ function Again({
  * one that actually works.
  */
 function FirstApp({ apps }: { apps: App[] }) {
-  const first = apps[0];
+  const first = showcase(apps);
 
   if (!first) {
     return (
@@ -513,24 +539,250 @@ function FirstApp({ apps }: { apps: App[] }) {
 /**
  * Step 5, from `uimockups/Onboarding - macOS.dc.html`.
  *
- * The mockup draws two states - a device waiting, and none yet - and this now
- * has both for real. A drawn card of a device that does not exist, with buttons
- * that do nothing, was teaching the one gesture the product is built on by
- * pantomime; and if somebody actually did open the link on their phone during
- * this step, the fake card sat there while the real request went unanswered.
+ * Three states, as the mockup draws them: not asked, with the **Enable
+ * notifications** button; on; and refused, with the route back and a **try
+ * again**. The banner above them is a drawing of the real thing, which is the
+ * point of asking - that alert is how an access request gets answered when the
+ * window is closed, which is nearly always.
  *
- * Approving here is the same socket call the pairing prompt makes. There is one
- * way a device gets in, and this is it.
+ * macOS asks once per app, ever. So the button disappears once there is an
+ * answer either way, and the refused state points at System Settings rather
+ * than offering a second prompt that would never appear. `try again` re-reads
+ * the state, for somebody who has just flipped the switch over there.
+ *
+ * The two states this screen cannot reach are the honest ones: a development
+ * build has no bundle for macOS to attach a permission to, and every platform
+ * that is not macOS has none of this yet. Both say so instead of offering a
+ * button that does nothing.
+ */
+function Notifications({ apps }: { apps: App[] }) {
+  const permission = useNotifyState();
+  const ask = useAskPermission();
+  const state = permission.data?.state;
+  const app = showcase(apps);
+
+  return (
+    <Step eyebrow="Step 5 · Notifications" title="Know when someone knocks">
+      <p style={body}>
+        The moment a new device asks to open one of your apps, Kitchen Table
+        pings you — that alert is how you approve or deny. Your Mac will ask
+        permission to notify you.
+      </p>
+
+      <div
+        style={{
+          background: "var(--raised)",
+          borderRadius: 14,
+          padding: 22,
+          display: "flex",
+          justifyContent: "center",
+          marginBottom: 20,
+        }}
+      >
+        <div
+          style={{
+            width: 300,
+            background: "var(--paper)",
+            border: "1px solid var(--border)",
+            borderRadius: 12,
+            padding: "12px 14px",
+            display: "flex",
+            gap: 12,
+            alignItems: "flex-start",
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 34,
+              height: 34,
+              flex: "none",
+              borderRadius: 9,
+              background: "var(--accent)",
+              color: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <DeviceShapeIcon shape="phone" size={18} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ font: "700 12px var(--font-sans)" }}>Kitchen Table</div>
+            <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--ink2)" }}>
+              A new device wants to open {app ? app.name : "one of your apps"}
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span
+              style={{
+                font: "600 10px var(--font-sans)",
+                color: "var(--accent)",
+                background: "var(--accent-tint)",
+                padding: "3px 8px",
+                borderRadius: 5,
+              }}
+            >
+              Approve
+            </span>
+            <span
+              style={{
+                font: "600 10px var(--font-sans)",
+                color: "var(--muted)",
+                background: "var(--chip)",
+                padding: "3px 8px",
+                borderRadius: 5,
+              }}
+            >
+              Deny
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {state === "granted" && (
+        <Note tone="green" title="Notifications on">
+          You will be pinged the moment a device knocks.
+        </Note>
+      )}
+
+      {state === "denied" && (
+        <Note tone="gold" title="You won’t get pop-ups for access requests.">
+          Nothing breaks — requests still appear as a badge on the Kitchen Table
+          window and in the menu bar. Turn them on in System Settings ›
+          Notifications, or{" "}
+          <Again onClick={() => permission.refetch()} busy={permission.isFetching}>
+            try again
+          </Again>
+          .
+        </Note>
+      )}
+
+      {state === "unbundled" && (
+        <Note tone="gold" title="Not in a development build">
+          macOS attaches this permission to an installed app, and there is no
+          bundle to attach it to here. It works in the built app.
+        </Note>
+      )}
+
+      {state === "unsupported" && (
+        <Note tone="gold" title="macOS only, for now">
+          Desktop notifications are not built for this platform yet.
+        </Note>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 18 }}>
+        {state === "not_determined" && (
+          <button
+            type="button"
+            disabled={ask.isPending}
+            onClick={() => ask.mutate()}
+            style={{
+              flex: "none",
+              border: "none",
+              background: "var(--accent)",
+              color: "#fff",
+              padding: "11px 22px",
+              borderRadius: 10,
+              font: "600 14px var(--font-sans)",
+              cursor: ask.isPending ? "not-allowed" : "pointer",
+              opacity: ask.isPending ? 0.7 : 1,
+            }}
+          >
+            {ask.isPending ? "Asking your Mac…" : "Enable notifications"}
+          </button>
+        )}
+        <span style={{ font: "400 12px var(--font-sans)", color: "var(--faint)" }}>
+          Recommended — the fastest way to catch a pairing request.
+        </span>
+      </div>
+    </Step>
+  );
+}
+
+/**
+ * Step 6, from `uimockups/Onboarding - macOS.dc.html`.
+ *
+ * Three states, as the mockup has them: nothing has asked yet, a device is
+ * asking, and it is done.
+ *
+ * The third one is the point of the step and was missing, which made approving
+ * look like a failure: the request card vanished the instant you answered it -
+ * correctly, there was nothing pending any more - and the screen fell back to
+ * "waiting for a device", as though the phone you had just let in had never
+ * arrived. The daemon had it right all along; the screen simply never said so.
+ *
+ * "Paired" is read from the device list rather than remembered from the button
+ * press, so it survives going back a step and returning, and it is true even if
+ * the approval happened from the banner or another window.
  */
 function Pair({ apps }: { apps: App[] }) {
-  const first = apps[0];
+  const first = showcase(apps);
   const devices = useDevices();
   const waiting = pendingDevices(devices.data);
   const asking = waiting[0];
 
+  // The owner's own machine is approved by definition and is not the lesson.
+  const paired = (devices.data ?? [])
+    .filter((device) => device.status === "approved")
+    .sort((a, b) => b.last_seen - a.last_seen)[0];
+
+  if (paired && !asking) {
+    return (
+      <Step eyebrow="Step 6 · Pair your phone" title="Paired! 🎉">
+        <p style={body}>
+          <b>{paired.name}</b> is now showing {first ? first.name : "your app"}. That is the
+          whole loop — build, serve, share.
+        </p>
+
+        <div
+          style={{
+            background: "var(--paper)",
+            border: "1px solid var(--border)",
+            borderRadius: 14,
+            padding: "16px 18px",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            maxWidth: 420,
+            marginBottom: 18,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 38,
+              height: 38,
+              flex: "none",
+              borderRadius: 10,
+              background: "var(--green-tint)",
+              color: "var(--green)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <DeviceShapeIcon shape={deviceShape(paired.user_agent)} size={19} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ font: "600 13.5px var(--font-sans)" }}>{paired.name}</div>
+            <div style={{ font: "400 11px var(--font-mono)", color: "var(--muted)" }}>
+              {paired.fingerprint} · {describeAgent(paired.user_agent)} · approved
+            </div>
+          </div>
+        </div>
+
+        <Note tone="blue" title="It stays yours to revoke">
+          Approved devices keep the name you gave them and appear in the Devices tab of
+          every app. Rename or revoke them whenever you like.
+        </Note>
+      </Step>
+    );
+  }
+
   return (
     <Step
-      eyebrow="Step 5 · Pair your phone"
+      eyebrow="Step 6 · Pair your phone"
       title={asking ? "Approve your phone" : "New devices always ask first"}
     >
       <p style={body}>
@@ -686,7 +938,7 @@ function Ready() {
   const launch = useLaunchAtLogin();
 
   return (
-    <Step eyebrow="Step 6 · You’re all set" title="Drop a folder, make an app">
+    <Step eyebrow="Step 7 · You’re all set" title="Drop a folder, make an app">
       <p style={body}>
         This is your library. Everything you build lands here, and every app you
         share stays yours to revoke.
