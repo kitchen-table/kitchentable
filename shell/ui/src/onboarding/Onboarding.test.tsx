@@ -13,6 +13,7 @@ function status(over: Partial<SysStatus> = {}): SysStatus {
     install_key: null,
     relay: { state: "off" },
     uptime_secs: 10,
+    workspace_locked: false,
     ...over,
   };
 }

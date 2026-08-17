@@ -4,12 +4,13 @@ import { Library } from "../Library";
 import { StatusBar } from "../StatusBar";
 import { WorkspaceActivity } from "../surfaces/Activity";
 import { AppDetail } from "../surfaces/AppDetail";
+import { Settings } from "../surfaces/Settings";
 import { quit } from "../daemon";
 import { useAddApp, useFolderDrop } from "../addApp";
 import { pending as pendingDevices, useDevices } from "../devices";
 import { useDaemonEvents } from "../events";
 import { LIBRARY, type Surface } from "../navigation";
-import { useAppearance } from "../theme";
+import { type Appearance, useAppearance } from "../theme";
 import { NewAppModal } from "./NewAppModal";
 import { PairingModal } from "./PairingModal";
 import { Sidebar, type McpStatus } from "./Sidebar";
@@ -36,7 +37,7 @@ export function Shell({
   const [newApp, setNewApp] = useState(false);
   const [dropError, setDropError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string[]>([]);
-  const { dark, toggle } = useAppearance();
+  const { appearance, setAppearance, dark, toggle } = useAppearance();
   const { create, importFolder, pick, pickFile } = useAddApp();
 
   // Mounted here rather than per-surface: an event that arrives while the
@@ -124,6 +125,8 @@ export function Shell({
             apps={apps}
             status={status}
             query={query}
+            appearance={appearance}
+            onAppearance={setAppearance}
             onNavigate={setSurface}
             onNewApp={() => setNewApp(true)}
           />
@@ -247,6 +250,8 @@ function Content({
   apps,
   status,
   query,
+  appearance,
+  onAppearance,
   onNavigate,
   onNewApp,
 }: {
@@ -254,6 +259,8 @@ function Content({
   apps: App[];
   status?: SysStatus;
   query: string;
+  appearance: Appearance;
+  onAppearance: (next: Appearance) => void;
   onNavigate: (surface: Surface) => void;
   onNewApp: () => void;
 }) {
@@ -290,25 +297,20 @@ function Content({
     case "activity":
       return <WorkspaceActivity apps={apps} onNavigate={onNavigate} />;
 
-    default:
-      // Filled in as each surface lands; the rail is already routing to them.
-      return <NotBuiltYet surface={surface} />;
+    case "settings":
+      return (
+        <Settings status={status} appearance={appearance} onAppearance={onAppearance} />
+      );
   }
+
+  // Every surface the rail can reach is built, so the "not built yet"
+  // placeholder is gone and this is unreachable. Kept as an exhaustiveness
+  // check rather than deleted: adding a surface to `Surface` without a case
+  // here is now a type error, which is a better failure than a window that
+  // renders nothing when somebody presses a new row.
+  return assertNever(surface);
 }
 
-function NotBuiltYet({ surface }: { surface: Surface }) {
-  return (
-    <div
-      style={{
-        flex: 1,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        font: "400 14px var(--font-sans)",
-        color: "var(--faint)",
-      }}
-    >
-      {surface.kind} is not built yet.
-    </div>
-  );
+function assertNever(surface: never): never {
+  throw new Error(`unhandled surface ${JSON.stringify(surface)}`);
 }

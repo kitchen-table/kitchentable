@@ -185,10 +185,21 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        // The folder picker behind "Add an app". Picking a folder is the one
-        // thing the daemon cannot do for itself: it has no window to put a
-        // native panel on.
+        // The folder picker behind "Add an app" and behind Settings' watched
+        // folder. Picking a folder is the one thing the daemon cannot do for
+        // itself: it has no window to put a native panel on.
         .plugin(tauri_plugin_dialog::init())
+        // Launch at login.
+        //
+        // `MacosLauncher::LaunchAgent` rather than a login item, because a
+        // login item opens the *app* and this needs the window to be able to
+        // stay hidden: somebody who wants their apps served from boot does not
+        // want a window in their face at every login. No launch arguments -
+        // the shell already decides whether to show itself.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState {
             supervisor: Arc::clone(&supervisor),
         })
