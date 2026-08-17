@@ -9,7 +9,6 @@ import {
   NetworkIcon,
   PublicIcon,
   SettingsIcon,
-  TeamIcon,
 } from "../icons";
 import type { Surface } from "../navigation";
 import { navSection } from "../navigation";
@@ -82,13 +81,6 @@ export function Sidebar({
         label="Settings"
         active={section === "settings"}
         onClick={() => onNavigate({ kind: "settings" })}
-      />
-      <NavRow
-        icon={<TeamIcon />}
-        label="Team"
-        badge="Paid"
-        active={section === "team"}
-        onClick={() => onNavigate({ kind: "team" })}
       />
 
       <Heading style={{ paddingTop: 20 }}>Filters</Heading>
