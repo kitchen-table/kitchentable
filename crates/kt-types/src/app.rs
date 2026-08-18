@@ -252,16 +252,27 @@ impl RelayMode {
 
     /// What switching the relay on should default to for a given visibility.
     ///
-    /// Invited apps are somebody's private thing shared with named people, so
-    /// they default to the mode where the operator cannot read them. Public
-    /// apps are already public, so they default to the mode that keeps the
-    /// link alive when the laptop shuts. The owner can always override; this
-    /// only decides which radio button starts selected.
-    pub const fn suggested_for(visibility: Visibility) -> Self {
-        match visibility {
-            Visibility::Public => Self::Standard,
-            _ => Self::Strict,
-        }
+    /// Standard, whatever the visibility, and the reason is worth keeping
+    /// because this used to suggest Strict for everything except Public.
+    ///
+    /// Strict cannot have a snapshot - no plaintext at the edge means there is
+    /// nothing to store - so a Strict app goes dark with the laptop. Snapshot
+    /// failover is the paid tier's headline for individuals. Suggesting Strict
+    /// for Invited therefore steered the *common* case, the rota shared with
+    /// one person, straight into the mode that turns off the feature they are
+    /// paying for. Somebody pays, shares a list, shuts the lid, and the link
+    /// dies: the exact complaint the subscription exists to fix.
+    ///
+    /// So Strict stays a deliberate choice for the app somebody means it for -
+    /// a journal, finances - rather than the answer somebody accepts because it
+    /// was already selected. That also keeps certificate issuance proportionate:
+    /// every Strict app needs its own publicly-trusted certificate, and the
+    /// issuing ceiling is shared across every install in the world.
+    ///
+    /// The owner can always override; this only decides which radio button
+    /// starts selected.
+    pub const fn suggested_for(_visibility: Visibility) -> Self {
+        Self::Standard
     }
 }
 
@@ -814,19 +825,22 @@ mod tests {
     }
 
     #[test]
-    fn switching_the_relay_on_suggests_the_safer_mode_for_everything_but_public() {
-        // Public is already public, so it defaults to the mode that keeps the
-        // link alive. Everything else defaults to the one the edge cannot read.
-        assert_eq!(
-            RelayMode::suggested_for(Visibility::Public),
-            RelayMode::Standard
-        );
+    fn switching_the_relay_on_never_suggests_the_mode_that_kills_the_snapshot() {
+        // This used to suggest Strict for everything but Public, which steered
+        // the common case - an Invited app shared with one person - into the
+        // mode that has no snapshot and therefore dies with the laptop. That is
+        // the complaint the paid tier exists to fix.
+        //
+        // If you are here because Strict shipped and you want the old shape
+        // back, read `suggested_for`'s documentation first: the argument is
+        // about defaults, not about whether Strict is good.
         for v in [
             Visibility::Private,
             Visibility::Network,
             Visibility::Invited,
+            Visibility::Public,
         ] {
-            assert_eq!(RelayMode::suggested_for(v), RelayMode::Strict);
+            assert_eq!(RelayMode::suggested_for(v), RelayMode::Standard);
         }
     }
 
