@@ -54,14 +54,18 @@ const URL_SETTING: &str = "relay.url";
 const DEFAULT_DOMAIN: &str = "kitchentable.cloud";
 /// Where `begin_upgrade` sends the browser. The page owns the checkout: it
 /// creates the Stripe session server-side with the install key in the
-/// metadata, so the daemon needs no Stripe vocabulary at all.
-const DEFAULT_SITE: &str = "https://kitchentable.cloud";
+/// metadata, so the daemon needs no Stripe vocabulary at all. The api host
+/// rather than the apex: the apex is the static marketing site, and the
+/// upgrade page is served by the control plane.
+const DEFAULT_SITE: &str = "https://api.kitchentable.cloud";
 /// The accounts API the daemon polls.
 const DEFAULT_API: &str = "https://api.kitchentable.cloud";
 /// Where a linked install dials when the cloud did not say otherwise. The
 /// answer from the API wins and is persisted; this exists so an install linked
 /// by an older cloud that omitted the field still has somewhere to go.
-const DEFAULT_RELAY_URL: &str = "wss://tunnel.kitchentable.cloud";
+/// The deployed edge's listener, port included (see the cloud repo's
+/// beta-deployment.md); the daemon must not have to guess it.
+const DEFAULT_RELAY_URL: &str = "wss://tunnel.kitchentable.cloud:8443";
 
 /// How often to ask whether the checkout has landed. Human-paced: the person
 /// is typing a card number, and the difference between learning in one second
