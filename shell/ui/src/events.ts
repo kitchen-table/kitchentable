@@ -52,6 +52,12 @@ export function invalidate(client: QueryClient, event: Event): void {
     case "relay_changed":
       void client.invalidateQueries({ queryKey: ["status"] });
       break;
+    case "account_changed":
+      // A link landing changes both surfaces at once: the account itself, and
+      // sys.status's handle - which is what every public address renders from.
+      void client.invalidateQueries({ queryKey: ["account"] });
+      void client.invalidateQueries({ queryKey: ["status"] });
+      break;
     case "error":
       // Nothing to refetch: the daemon is telling the owner something, and
       // dropping it silently is better than guessing which view it belongs to.

@@ -20,6 +20,7 @@
 //! tool surface in D6 be a thin projection of this API rather than a rewrite of
 //! it (docs/architecture.md section 12).
 
+pub mod account;
 pub mod app;
 pub mod event;
 pub mod notify;
@@ -27,6 +28,7 @@ pub mod paths;
 pub mod protocol;
 pub mod status;
 
+pub use account::{AccountLink, AccountStatus};
 pub use app::{
     normalise_public_label, App, AppManifest, AppRecord, PublicLabelError, RelayMode, StorageMode,
     Urls, Visibility, MAX_DNS_LABEL,

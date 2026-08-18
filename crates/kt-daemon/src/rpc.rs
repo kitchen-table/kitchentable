@@ -53,6 +53,8 @@ pub struct Context {
     /// Each app's own data. The same instance the HTTP layer writes through,
     /// so the Storage tab shows what the apps actually stored.
     pub stores: Arc<kt_store::Storage>,
+    /// The install's link to an account, and the relay task it drives.
+    pub account: Arc<crate::account::Manager>,
 }
 
 /// The daemon's event bus.
@@ -547,6 +549,24 @@ fn handle(ctx: &Context, request: &Request) -> Result<serde_json::Value, KtError
             json(&events)
         }
 
+        // ---- the account ----------------------------------------------
+        //
+        // Linking is the paid tier's whole ceremony, and the daemon's side of
+        // it is three idempotent calls a stateless caller can make cold: where
+        // do I stand, start an upgrade, forget the link. The checkout itself
+        // happens in a browser; see the account module.
+        "account.status" => json(&ctx.account.status()),
+
+        "account.begin_upgrade" => {
+            let started = ctx.account.begin_upgrade().map_err(account_error)?;
+            json(&started)
+        }
+
+        "account.unlink" => {
+            let status = ctx.account.unlink().map_err(account_error)?;
+            json(&status)
+        }
+
         "sys.status" => {
             let identity = ctx.library.relay_identity();
             json(&SysStatus {
@@ -784,6 +804,23 @@ fn notify_prefs(ctx: &Context) -> Result<kt_types::NotifyPrefs, KtError> {
 fn store_error(e: kt_store::StoreError) -> KtError {
     KtError {
         code: ErrorCode::Internal,
+        message: e.to_string(),
+        detail: None,
+    }
+}
+
+/// Account failures, each mapped to the code that tells the caller what kind
+/// of wrong it is: no identity is a machine state nothing in the request can
+/// fix, already-linked is a conflict with what exists, and an environment
+/// override is policy.
+fn account_error(e: crate::account::AccountError) -> KtError {
+    use crate::account::AccountError::*;
+    KtError {
+        code: match e {
+            NoIdentity => ErrorCode::InvalidState,
+            AlreadyLinked { .. } => ErrorCode::Conflict,
+            EnvironmentOutranks => ErrorCode::Forbidden,
+        },
         message: e.to_string(),
         detail: None,
     }
@@ -1180,7 +1217,26 @@ mod tests {
             install_key: None,
             relay: Arc::new(crate::relay::RelayStatus::new()),
             stores: Arc::new(kt_store::Storage::new(scratch_stores())),
+            account: detached_account(),
         }
+    }
+
+    /// An account manager of its own, pointing nowhere. `nowhere` matters:
+    /// a fixture that defaulted to the real cloud would have unit tests
+    /// dialling the internet the day someone exercises `begin_upgrade`.
+    fn detached_account() -> Arc<crate::account::Manager> {
+        Arc::new(crate::account::Manager::new(
+            crate::account::Cloud {
+                site: "https://site.test".into(),
+                api: "http://127.0.0.1:1".into(),
+            },
+            None,
+            Arc::new(kt_store::Store::in_memory().expect("opens")),
+            Arc::new(Library::new()),
+            Arc::new(crate::relay::RelayStatus::new()),
+            Events::new(),
+            Arc::new(axum::Router::new()),
+        ))
     }
 
     /// A store directory of its own per context.
@@ -1284,6 +1340,37 @@ mod tests {
             ResponsePayload::Error(e) => e,
             ResponsePayload::Result(v) => panic!("expected an error, got {v}"),
         }
+    }
+
+    #[test]
+    fn account_status_answers_unlinked_with_no_identity() {
+        // Every install today: no account, and - in this fixture - no install
+        // key either. Both are plain states, not errors.
+        let ctx = context();
+        let status = result(&ctx, &request("account.status", None));
+        assert_eq!(status["link"]["state"], "unlinked");
+        assert!(status.get("install_key").is_none());
+    }
+
+    #[test]
+    fn an_upgrade_without_an_identity_is_refused_before_anyone_pays() {
+        // Without an install key the checkout webhook would have nothing to
+        // link, so the money would buy exactly nothing. InvalidState, because
+        // nothing in the request can fix it - the keystore has to.
+        let ctx = context();
+        assert_eq!(
+            error(&ctx, &request("account.begin_upgrade", None)).code,
+            ErrorCode::InvalidState
+        );
+    }
+
+    #[test]
+    fn unlinking_an_unlinked_install_is_a_no_op_rather_than_an_error() {
+        // Idempotent like every other mutating method: a stateless caller
+        // repeating itself must land in the same place, not in an error.
+        let ctx = context();
+        let status = result(&ctx, &request("account.unlink", None));
+        assert_eq!(status["link"]["state"], "unlinked");
     }
 
     #[test]

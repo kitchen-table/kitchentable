@@ -37,6 +37,11 @@ tower = { version = "0.5", features = ["util"] }
 yamux = "0.14.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The accounts API poll and nothing else. Default features off: the daemon
+# already chose rustls with webpki roots for the tunnel (see tokio-tungstenite
+# below), and a second TLS stack arriving through a convenience feature is
+# exactly how the provider conflict described in main.rs comes back.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 
 [dev-dependencies]
 tokio-util = { version = "0.7", features = ["compat"] }
