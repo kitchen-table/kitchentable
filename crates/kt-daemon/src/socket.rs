@@ -242,6 +242,18 @@ mod tests {
                 std::env::temp_dir().join("kt-socket-stores"),
             )),
             rescan: std::sync::Arc::new(|| {}),
+            account: Arc::new(crate::account::Manager::new(
+                crate::account::Cloud {
+                    site: "https://site.test".into(),
+                    api: "http://127.0.0.1:1".into(),
+                },
+                None,
+                Arc::new(kt_store::Store::in_memory().expect("opens")),
+                Arc::new(crate::library::Library::new()),
+                Arc::new(crate::relay::RelayStatus::new()),
+                crate::rpc::Events::new(),
+                Arc::new(axum::Router::new()),
+            )),
         })
     }
 

@@ -13,6 +13,7 @@ use kt_server::AppSource;
 use kt_store::Store;
 use kt_types::{paths, AppRecord, DegradedReason, Event, ServingState, Urls};
 
+mod account;
 mod authoring;
 mod keys;
 mod library;
@@ -221,6 +222,23 @@ async fn run() -> Result<(), StartupError> {
 
     let presence_for_http = Arc::clone(&presence);
 
+    // Each app's own data, in its own file under the state directory. One
+    // instance, shared with the socket so the Storage tab reads what the apps
+    // wrote rather than a second set of connections to the same files.
+    let app_storage: kt_server::storage::Shared = Arc::new(storage::Apps::new(Arc::clone(&stores)));
+    let app =
+        kt_server::router_with_storage(Arc::clone(&library), trust, presence_for_http, app_storage);
+
+    let account = Arc::new(account::Manager::new(
+        account::Cloud::from_env(),
+        relay_identity,
+        Arc::clone(&store),
+        Arc::clone(&library),
+        Arc::clone(&relay_status),
+        events.clone(),
+        Arc::new(app.clone()),
+    ));
+
     let ctx = Arc::new(rpc::Context {
         library: Arc::clone(&library),
         store: Arc::clone(&store),
@@ -236,6 +254,7 @@ async fn run() -> Result<(), StartupError> {
         install_key,
         relay: Arc::clone(&relay_status),
         stores: Arc::clone(&stores),
+        account: Arc::clone(&account),
     });
 
     // Nobody tells us when a page stops checking in - that is the whole point
@@ -293,56 +312,18 @@ async fn run() -> Result<(), StartupError> {
         tracing::debug!("a cryptography provider was already installed");
     }
 
-    // Which public names this machine answers to. A placeholder for the handle
-    // claim that arrives with account linking, in the same spirit as
-    // KT_RELAY_URL - and, like it, absent on every install today. Without one
-    // the daemon resolves no relay hostname at all, which is correct: nothing
-    // has been published.
-    if let Some((handle, domain)) = relay_handle() {
-        tracing::info!(%handle, %domain, "relay hostnames configured");
-        library.set_relay_identity(Some((handle, domain)));
-    }
-
-    // Each app's own data, in its own file under the state directory. One
-    // instance, shared with the socket so the Storage tab reads what the apps
-    // wrote rather than a second set of connections to the same files.
-    let app_storage: kt_server::storage::Shared = Arc::new(storage::Apps::new(Arc::clone(&stores)));
-    let app = kt_server::router_with_storage(library, trust, presence_for_http, app_storage);
-
-    // Dial the relay, if this install has one and knows who it is.
+    // The account: which public names this machine answers to, and the relay
+    // task those names make worth dialling. Restores a stored link (or the
+    // KT_RELAY_HANDLE / KT_RELAY_URL overrides) and dials if there is anywhere
+    // to dial - spawned inside, never awaited, because serving on the local
+    // network must not wait on a network dial and must not stop because one
+    // failed. A daemon with no relay is not a degraded daemon - it is the
+    // free tier.
     //
-    // Spawned and never awaited: serving on the local network must not wait on
-    // a network dial, and must not stop because one failed. A daemon with no
-    // relay is not a degraded daemon - it is the free tier.
-    //
-    // It gets the same router the LAN listener uses, so a relayed request meets
-    // the same gate rather than a second implementation of one. What it does
-    // not get is connect info: see relay::session.
-    match (relay::Config::from_env(), relay_identity) {
-        (Some(config), Some(identity)) => {
-            tracing::info!(url = config.url, "relay configured; dialling");
-            let events = events.clone();
-            tokio::spawn(relay::run(
-                config,
-                identity,
-                Arc::new(app.clone()),
-                Arc::clone(&relay_status),
-                // Pushed as it happens. A window that learns the tunnel dropped
-                // sixty seconds late is a window that let somebody send a link
-                // in the meantime.
-                move |state| {
-                    events.send(Event::RelayChanged {
-                        relay: state.into(),
-                    })
-                },
-            ));
-        }
-        (Some(_), None) => tracing::warn!(
-            "a relay is configured but this install has no identity, so there \
-             is nothing to dial with; see the keystore warnings above"
-        ),
-        (None, _) => {}
-    }
+    // The relay gets the same router the LAN listener uses, so a relayed
+    // request meets the same gate rather than a second implementation of one.
+    // What it does not get is connect info: see relay::session.
+    account.start();
 
     let http = tokio::spawn(async move {
         // with_connect_info, or the peer address never reaches the gate and
@@ -531,34 +512,6 @@ fn fingerprint(record: &AppRecord) -> AppFingerprint {
 /// An origin with the port left off when it is the default, because a URL
 /// someone reads aloud or texts to a family member should be as short as it
 /// can honestly be.
-/// This install's handle and the domain its apps hang off, if it has been told.
-///
-/// `KT_RELAY_HANDLE=adarsh` plus an optional `KT_RELAY_DOMAIN`, defaulting to
-/// the one the product uses. Both are placeholders for the handle claim that
-/// arrives with account linking; neither is set on any install today.
-///
-/// A handle containing a hyphen or a dot is refused rather than used: hostnames
-/// split at the last hyphen, so a handle with one in it makes every name
-/// ambiguous. Better to answer nothing than to answer the wrong app.
-fn relay_handle() -> Option<(String, String)> {
-    let handle = std::env::var("KT_RELAY_HANDLE").ok()?;
-    let handle = handle.trim().to_ascii_lowercase();
-    if handle.is_empty() || handle.contains('-') || handle.contains('.') {
-        if !handle.is_empty() {
-            tracing::warn!(%handle, "a relay handle may not contain a hyphen or a dot; ignoring it");
-        }
-        return None;
-    }
-
-    let domain = std::env::var("KT_RELAY_DOMAIN")
-        .ok()
-        .map(|d| d.trim().to_ascii_lowercase())
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "kitchentable.cloud".to_string());
-
-    Some((handle, domain))
-}
-
 fn origin_for(host: &str, port: u16) -> String {
     if port == 80 {
         format!("http://{host}")

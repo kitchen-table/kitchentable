@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::{app::App, status::RelayState, status::ServingState};
+use crate::{account::AccountStatus, app::App, status::RelayState, status::ServingState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -31,6 +31,14 @@ pub enum Event {
     /// unreachable and the window admitting it is exactly the interval somebody
     /// spends sending a link that does not work.
     RelayChanged { relay: RelayState },
+    /// The install's link to an account changed: a checkout began, a handle
+    /// landed, or the owner unlinked.
+    ///
+    /// Pushed rather than polled for the same reason as `RelayChanged`: the
+    /// moment linking completes is the moment the Sharing tab stops saying
+    /// "not available yet", and a window that catches up on a poll interval
+    /// later is a window the owner has already given up on.
+    AccountChanged { account: AccountStatus },
     /// A device is waiting to be let in. This is what pops the approval prompt
     /// (docs/architecture.md section 4).
     ///

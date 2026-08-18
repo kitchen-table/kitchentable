@@ -178,6 +178,58 @@ describe("Sharing: the relay", () => {
     expect(button).toBeNull();
   });
 
+  it("offers the upgrade where the switch cannot be, and opens the browser", async () => {
+    // The card that says "no handle" is the one place the person is already
+    // asking for exactly what the paid tier sells, so it carries the way in.
+    // The ceremony is the browser's: the daemon answers with the page to open
+    // and then notices the link landing by itself.
+    invoke.mockImplementation((_cmd: unknown, args: unknown) => {
+      const method = (args as { method: string }).method;
+      if (method === "account.begin_upgrade") {
+        return Promise.resolve({
+          url: "https://kitchentable.cloud/upgrade?install=k3y",
+        });
+      }
+      return Promise.resolve([]);
+    });
+    const opened = vi.spyOn(window, "open").mockReturnValue(null);
+    renderSharing({ visibility: "invited" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Link an account" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("kt_call", {
+        method: "account.begin_upgrade",
+        params: null,
+      });
+      // No Tauri host under vitest, so the browser fallback is the evidence
+      // the URL went somewhere rather than being returned into silence.
+      expect(opened).toHaveBeenCalledWith(
+        "https://kitchentable.cloud/upgrade?install=k3y",
+        "_blank",
+        "noopener",
+      );
+    });
+    opened.mockRestore();
+  });
+
+  it("says finish-in-your-browser while the checkout is in flight", async () => {
+    // "Not linked" beside a checkout somebody is midway through reads as the
+    // button having failed. Waiting is its own state, drawn as one.
+    invoke.mockImplementation((_cmd: unknown, args: unknown) => {
+      const method = (args as { method: string }).method;
+      if (method === "account.status") {
+        return Promise.resolve({ install_key: "k3y", link: { state: "waiting" } });
+      }
+      return Promise.resolve([]);
+    });
+    renderSharing({ visibility: "invited" });
+
+    expect(await screen.findByText("Finish in your browser")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Reopen the page" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Link an account" })).toBeNull();
+  });
+
   it("waits for the daemon before claiming the switch works", async () => {
     // Unknown is its own state. Drawing the offer as live before the daemon has
     // said whether there is a handle is a claim about the machine, not a delay.

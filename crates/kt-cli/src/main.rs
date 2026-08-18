@@ -18,10 +18,12 @@ const USAGE: &str = "\
 kt - a home for your small software
 
 Usage:
-  kt list        Everything in your workspace, and where to reach it
-  kt url <app>   The app's URL, with a QR code to point a phone at
-  kt status      Whether the daemon is serving, and from which folder
-  kt help        This message
+  kt list            Everything in your workspace, and where to reach it
+  kt url <app>       The app's URL, with a QR code to point a phone at
+  kt status          Whether the daemon is serving, and from which folder
+  kt account         Whether this machine is linked to an account
+  kt account link    Start the upgrade that links it
+  kt help            This message
 ";
 
 fn main() -> ExitCode {
@@ -41,6 +43,14 @@ fn main() -> ExitCode {
             }
         },
         "status" => run(status),
+        "account" => match args.get(1).map(String::as_str) {
+            None | Some("status") => run(account),
+            Some("link") => run(account_link),
+            Some(other) => {
+                eprintln!("kt account: unknown subcommand {other:?}\n\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        },
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -108,6 +118,58 @@ fn url(client: &mut Client, slug: &str) -> Result<(), ClientError> {
             println!("  announced as {hostname} - the name you wanted was taken");
         }
     }
+    println!();
+    Ok(())
+}
+
+/// Where this machine stands with an account, in the account's own words.
+fn account(client: &mut Client) -> Result<(), ClientError> {
+    let status: kt_types::AccountStatus =
+        serde_json::from_value(client.call("account.status", None)?)?;
+
+    match status.link {
+        kt_types::AccountLink::Linked { handle, domain } => {
+            println!("{:<12} linked", "account");
+            println!("{:<12} {handle}", "handle");
+            println!("{:<12} apps publish as <app>-{handle}.{domain}", "names");
+        }
+        kt_types::AccountLink::Waiting => {
+            println!(
+                "{:<12} waiting - finish the upgrade in your browser",
+                "account"
+            );
+            println!("{:<12} run `kt account link` again for the address", "hint");
+        }
+        kt_types::AccountLink::Unlinked => {
+            println!("{:<12} not linked", "account");
+            println!(
+                "{:<12} `kt account link` gives your apps public addresses",
+                "hint"
+            );
+        }
+    }
+    if let Some(key) = status.install_key {
+        println!("{:<12} {key}", "install key");
+    }
+    Ok(())
+}
+
+/// Start the upgrade: a URL and a QR code, then the daemon takes over.
+///
+/// The CLI exits immediately and that is correct: the daemon owns the wait,
+/// so closing this terminal loses nothing. The QR is for the person whose
+/// daemon runs headless on a box with no browser - the checkout can happen
+/// on their phone.
+fn account_link(client: &mut Client) -> Result<(), ClientError> {
+    let started = client.call("account.begin_upgrade", None)?;
+    let url = started["url"].as_str().unwrap_or_default().to_string();
+
+    println!();
+    println!("{}", qr::render(&url));
+    println!("  {url}");
+    println!();
+    println!("  Finish in your browser (or scan from a phone).");
+    println!("  This machine will notice by itself - nothing to come back for.");
     println!();
     Ok(())
 }

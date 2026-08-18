@@ -13,6 +13,7 @@ import {
 } from "./relay";
 import { expiry } from "./activity";
 import { useStatus } from "./daemon";
+import { useAccount, useBeginUpgrade } from "./account";
 import { Modal } from "./chrome/Modal";
 
 export interface InviteView {
@@ -667,7 +668,8 @@ function useRelaySuffix(): string | null {
 }
 
 /**
- * The relay, on a machine that has no handle to publish under.
+ * The relay, on a machine that has no handle to publish under - and the way
+ * to get one.
  *
  * Drawn instead of the Turn-on card, and the reason is the rule this whole tab
  * exists for. A public hostname is `<label>-<handle>.<domain>`, so with no
@@ -678,10 +680,19 @@ function useRelaySuffix(): string | null {
  * class of lie as a blurb promising reach, and it is worse for arriving after
  * the press rather than before it.
  *
+ * So the card offers the one action that would make the switch real: the
+ * upgrade. The whole ceremony happens in a browser - see `useBeginUpgrade` -
+ * and while it is in flight the card says so, because "not linked" beside a
+ * checkout somebody is mid-way through reads as the button having failed.
+ *
  * Stated as a fact about the machine rather than about the app, because it is
  * one: every app here is in the same position, and none of them is broken.
  */
 function RelayHasNowhereToGo({ app }: { app: App }) {
+  const account = useAccount(true);
+  const upgrade = useBeginUpgrade();
+  const waiting = account.data?.link?.state === "waiting";
+
   return (
     <div
       style={{
@@ -689,25 +700,66 @@ function RelayHasNowhereToGo({ app }: { app: App }) {
         border: "1px solid var(--border)",
         borderRadius: 13,
         padding: 18,
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
       }}
     >
-      <div style={{ font: "700 14px var(--font-sans)", marginBottom: 4 }}>
-        Not available yet
+      <div style={{ flex: 1 }}>
+        <div style={{ font: "700 14px var(--font-sans)", marginBottom: 4 }}>
+          {waiting ? "Finish in your browser" : "Not available yet"}
+        </div>
+        <p
+          style={{
+            margin: 0,
+            font: "400 12px/1.55 var(--font-sans)",
+            color: "var(--ink3)",
+          }}
+        >
+          {waiting ? (
+            <>
+              The upgrade page is open in your browser. The moment it is done,
+              this machine gets its handle and this switch comes alive — this
+              window updates by itself, nothing to come back and press.
+            </>
+          ) : (
+            <>
+              Publishing needs a handle — the part after the hyphen in a public
+              address — and this machine does not have one until you link an
+              account. There is nowhere to publish to yet, so there is nothing
+              to switch on. <b style={{ fontWeight: 600 }}>{app.name}</b> is
+              reachable on your network at{" "}
+              <b style={{ fontWeight: 600 }}>{app.url}</b>, as it was before.
+            </>
+          )}
+          {upgrade.isError && (
+            <>
+              {" "}
+              <b style={{ color: "var(--gold)" }}>
+                {(upgrade.error as { message?: string }).message ??
+                  "Could not start the upgrade."}
+              </b>
+            </>
+          )}
+        </p>
       </div>
-      <p
+      <button
+        type="button"
+        onClick={() => upgrade.mutate()}
+        disabled={upgrade.isPending}
         style={{
-          margin: 0,
-          font: "400 12px/1.55 var(--font-sans)",
-          color: "var(--ink3)",
+          background: waiting ? "var(--paper)" : "var(--accent)",
+          color: waiting ? "var(--ink2)" : "#fff",
+          border: waiting ? "1px solid var(--border)" : "none",
+          padding: "10px 16px",
+          borderRadius: 10,
+          font: "600 13px var(--font-sans)",
+          whiteSpace: "nowrap",
+          cursor: upgrade.isPending ? "default" : "pointer",
         }}
       >
-        Publishing needs a handle — the part after the hyphen in a public
-        address — and this machine does not have one until you link an account.
-        There is nowhere to publish to yet, so there is nothing to switch on.{" "}
-        <b style={{ fontWeight: 600 }}>{app.name}</b> is reachable on your
-        network at <b style={{ fontWeight: 600 }}>{app.url}</b>, as it was
-        before.
-      </p>
+        {waiting ? "Reopen the page" : "Link an account"}
+      </button>
     </div>
   );
 }
