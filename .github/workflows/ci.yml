@@ -54,7 +54,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: shell/src-tauri
+          # Two workspaces: the shell itself, and the root workspace where
+          # `stage the daemon` below builds kt-daemon.
+          workspaces: |
+            .
+            shell/src-tauri
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -64,6 +68,17 @@ jobs:
       - name: build the UI
         # tauri.conf.json resolves frontendDist to ../ui/dist
         run: pnpm -C shell/ui build
+      - name: stage the daemon
+        # tauri.conf.json names kt-daemon as a sidecar (bundle.externalBin),
+        # and tauri-build's build script checks the staged binary exists on
+        # every compile - clippy included. `tauri build` stages it itself via
+        # beforeBuildCommand, but clippy runs first, so stage it here too.
+        # TAURI_ENV_DEBUG makes this the same debug build the `tauri build
+        # --debug` step wants, so the work is done once and the cache serves
+        # it twice.
+        env:
+          TAURI_ENV_DEBUG: "true"
+        run: node shell/scripts/stage-daemon.mjs
       - name: fmt
         working-directory: shell/src-tauri
         run: cargo fmt --all --check
