@@ -22,6 +22,7 @@ pub mod gate;
 pub mod live;
 pub mod pages;
 pub mod paths;
+pub mod listing;
 pub mod presence;
 pub mod storage;
 
@@ -673,6 +674,34 @@ fn not_found_page() -> Response {
 async fn serve_app(app: &ServedApp, path: &str) -> Response {
     let file = match paths::resolve_file(&app.root, path, &app.entry) {
         Ok(file) => file,
+        // A real folder with no page in it. Listing it is what makes a folder
+        // of photos an app rather than a 404 (see `listing`), but only for an
+        // app that has no entry page *at all* - otherwise every `assets/`
+        // directory in a normal web app would become browsable, which is a
+        // change nobody asked for and a way to show file names the owner
+        // never meant to publish. One stat, on a path already inside the root.
+        Err(paths::ResolveError::NoEntry(dir)) => {
+            if app.root.join(&app.entry).is_file() {
+                return not_found("Not found.");
+            }
+            let subpath = dir
+                .strip_prefix(&app.root)
+                .ok()
+                .map(|rest| rest.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/html".to_string()),
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                ],
+                Body::from(live::inject(
+                    &listing::render(&app.name, &subpath, &dir),
+                    &app.slug,
+                )),
+            )
+                .into_response();
+        }
         // Deliberately identical responses: telling a caller apart a refusal
         // from a miss leaks whether a path exists outside the app folder.
         Err(paths::ResolveError::NotFound) | Err(paths::ResolveError::Escapes) => {
