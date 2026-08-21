@@ -25,15 +25,34 @@ name: Release
 # review is unlikely to accept. That is also the ordinary shape for this kind
 # of tool - Zed, Obsidian, Cursor, Raycast and Warp all distribute this way,
 # and Obsidian in particular ships its DMG straight off GitHub Releases.
+#
+# ## Nobody types a tag
+#
+# `version` in tauri.conf.json is the source of truth, and the tag is derived
+# from it. Bump the version, merge to main, and this decides for itself
+# whether that version has been released yet. A push that does not change the
+# version does nothing at all, so this is safe to leave on every merge.
+#
+# The alternative - a human running `git tag v0.1.2 && git push --tags` - is
+# a number typed twice, and the two copies disagree eventually. Usually at the
+# least convenient moment, because the symptom is an app that reports one
+# version and downloads under another.
+#
+# **The tag appears when the draft is published, not when it is built.**
+# GitHub does not create a tag for a draft release; it creates it the moment
+# somebody presses Publish. That is unintuitive enough to be worth stating
+# twice, and it is why the "has this shipped already" check below asks about
+# releases rather than about tags - a draft has no tag to find.
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing tag to build, e.g. v0.1.0"
-        required: true
+      force:
+        description: "Build even if a release already exists for this version"
+        type: boolean
+        default: false
 
 # Never build two releases at once, and never cancel one half way: a killed
 # run can leave a Release created with no asset on it, which reads to a
@@ -49,7 +68,58 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cheap, and on Linux, because most pushes stop here. Deciding on the macOS
+  # runner would spend a minute of the expensive machine to answer "no".
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      release: ${{ steps.read.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          version=$(node -p "require('./shell/src-tauri/tauri.conf.json').version")
+          # The crate carries the same number and nothing enforced that until
+          # now. They drift silently: the bundle takes its version from the
+          # config, so a stale Cargo.toml is invisible until somebody reads
+          # `--version` off the binary and gets a different answer.
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' shell/src-tauri/Cargo.toml | head -1)
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tauri.conf.json says $version and Cargo.toml says $crate; they must match"
+            exit 1
+          fi
+
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # Ask about the release rather than the tag. A draft has no tag yet
+          # - GitHub creates it on publish - so checking for the tag would
+          # rebuild the same draft on every merge until somebody published it.
+          if gh release view "$tag" --json id >/dev/null 2>&1; then
+            if [ "$FORCE" = "true" ]; then
+              echo "::warning::$tag already has a release; building anyway because force was set"
+              echo "release=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$tag already has a release. Bump the version in tauri.conf.json to ship another."
+              echo "release=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "$tag has no release yet - building it"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: decide
+    if: needs.decide.outputs.release == 'true'
     # The macOS runner is Apple silicon; the universal target is what makes
     # the result run on Intel too. `stage-daemon.mjs` builds both daemon
     # arches and lipos them for exactly this reason.
@@ -58,24 +128,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: the tag and the version must agree
-        # A tag that does not match the version in the config produces an app
-        # that reports one number and downloads under another, and the updater
-        # that arrives later would compare the wrong pair. Cheap to check, and
-        # impossible to notice afterwards.
-        run: |
-          set -euo pipefail
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
-          tag="${ref#refs/tags/}"
-          config=$(node -p "require('./shell/src-tauri/tauri.conf.json').version")
-          echo "tag=$tag config=$config"
-          if [ "$tag" != "v$config" ]; then
-            echo "::error::tag $tag does not match tauri.conf.json version $config"
-            exit 1
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -197,25 +249,33 @@ jobs:
       - name: attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.decide.outputs.tag }}
         run: |
           set -euo pipefail
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
-          tag="${ref#refs/tags/}"
+          # `--target` pins the tag to the commit this was built from, which
+          # matters because the tag does not exist yet: GitHub creates it when
+          # the draft is published, and without this it would be created
+          # against whatever main has moved on to by then.
+          #
           # Draft on purpose. The last check on a Mac app is a human opening
           # it, and publishing is one click once somebody has. Until then the
           # landing page's download button must not find it.
-          gh release create "$tag" "$DMG" \
+          gh release create "$TAG" "$DMG" \
             --draft \
-            --title "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
             --generate-notes
 
       - name: summary
         if: always()
+        env:
+          TAG: ${{ needs.decide.outputs.tag }}
         run: |
           {
             echo "### release"
             echo
-            echo "- tag: \`${{ github.event.inputs.tag || github.ref_name }}\`"
+            echo "- version: \`$TAG\` (from tauri.conf.json)"
             echo "- signed, notarized and stapled; universal"
-            echo "- published as a **draft** - open the DMG on a clean Mac, then publish"
+            echo "- created as a **draft**, so no tag exists yet"
+            echo "- open the DMG on a clean Mac, then press Publish - that is what creates the tag"
           } >> "$GITHUB_STEP_SUMMARY"
