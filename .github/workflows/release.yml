@@ -1,0 +1,199 @@
+name: Release
+
+# A signed, notarized, stapled, universal DMG, attached to a GitHub Release.
+#
+# ## What this is not
+#
+# It is not the first thing to run. Notarization fails for small, tedious
+# reasons - an unsigned sidecar, a missing entitlement, a hardened-runtime
+# rejection - and every one of them is quicker to find on a laptop than
+# through a CI log. Do one signed build by hand first, install it on a Mac
+# that has never seen this project, and only then let this file automate what
+# already worked.
+#
+# ## Why the checks run again here
+#
+# CI ran them on the commit. This runs them on the tag, because a release that
+# trusts a green tick from an earlier run is a release that ships whatever
+# raced past it. They cost minutes and they are the last chance.
+#
+# ## Distribution
+#
+# Direct download, Developer ID signed, from GitHub Releases. Not the Mac App
+# Store: this app runs a sidecar daemon that serves folders from the user's
+# disk over the local network, which the App Store sandbox makes very hard and
+# review is unlikely to accept. That is also the ordinary shape for this kind
+# of tool - Zed, Obsidian, Cursor, Raycast and Warp all distribute this way,
+# and Obsidian in particular ships its DMG straight off GitHub Releases.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.1.0"
+        required: true
+
+# Never build two releases at once, and never cancel one half way: a killed
+# run can leave a Release created with no asset on it, which reads to a
+# visitor as a broken download rather than an absent one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # creates the Release and uploads the DMG
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    # The macOS runner is Apple silicon; the universal target is what makes
+    # the result run on Intel too. `stage-daemon.mjs` builds both daemon
+    # arches and lipos them for exactly this reason.
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: the tag and the version must agree
+        # A tag that does not match the version in the config produces an app
+        # that reports one number and downloads under another, and the updater
+        # that arrives later would compare the wrong pair. Cheap to check, and
+        # impossible to notice afterwards.
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${ref#refs/tags/}"
+          config=$(node -p "require('./shell/src-tauri/tauri.conf.json').version")
+          echo "tag=$tag config=$config"
+          if [ "$tag" != "v$config" ]; then
+            echo "::error::tag $tag does not match tauri.conf.json version $config"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            shell/src-tauri
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      # ---- the build ------------------------------------------------------
+
+      - name: build, sign and notarize
+        env:
+          # The Developer ID certificate, exported as .p12 and base64'd. The
+          # runner imports it into a temporary keychain and throws it away
+          # with the machine.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # The full identity string, e.g.
+          #   Developer ID Application: Some Name (ABCDE12345)
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarization, by the Apple ID route. The App Store Connect API key
+          # route (APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_PATH) is
+          # the alternative and is better for a team, because it is not tied
+          # to one person's account or their 2FA.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }} # an app-specific password
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Hardened runtime is on by default in tauri-bundler and must stay
+          # on: notarization refuses a build without it. beforeBuildCommand
+          # builds the UI and stages the universal daemon, so there is nothing
+          # to do here but name the target.
+          pnpm -C shell tauri build --target universal-apple-darwin
+
+      # ---- prove it, rather than assume it --------------------------------
+
+      - name: the artefact must actually be signed and notarized
+        # The whole point of these three commands is that an unsigned or
+        # un-notarized build looks *exactly* like a good one until somebody
+        # downloads it onto a Mac that is not this one. A release that ships
+        # a Gatekeeper wall is worse than a release that fails here.
+        run: |
+          set -euo pipefail
+          root=shell/src-tauri/target/universal-apple-darwin/release/bundle
+          app=$(find "$root/macos" -maxdepth 1 -name "*.app" | head -1)
+          dmg=$(find "$root/dmg" -maxdepth 1 -name "*.dmg" | head -1)
+          echo "app=$app"
+          echo "dmg=$dmg"
+          [ -n "$app" ] && [ -n "$dmg" ] || { echo "::error::no app or dmg was produced"; exit 1; }
+
+          echo "--- the signature covers everything, sidecar included ---"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          echo "--- Gatekeeper would let a stranger open it ---"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          echo "--- the notarization ticket is stapled, so it opens offline ---"
+          xcrun stapler validate "$dmg"
+
+          echo "--- and it really is universal ---"
+          lipo -archs "$app/Contents/MacOS/kt-daemon"
+
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+
+      - name: the local-network keys must be in the bundle
+        # Info.plist is merged by the bundler, and a merge that silently did
+        # nothing would produce an app that works on every developer's Mac and
+        # fails the phone moment on every clean one. Check the keys are there
+        # rather than trusting that the file was picked up.
+        run: |
+          set -euo pipefail
+          root=shell/src-tauri/target/universal-apple-darwin/release/bundle
+          plist="$(find "$root/macos" -maxdepth 1 -name "*.app" | head -1)/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$plist"
+          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$plist"
+
+      # ---- publish --------------------------------------------------------
+
+      - name: attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${ref#refs/tags/}"
+          # Draft on purpose. The last check on a Mac app is a human opening
+          # it, and publishing is one click once somebody has. Until then the
+          # landing page's download button must not find it.
+          gh release create "$tag" "$DMG" \
+            --draft \
+            --title "$tag" \
+            --generate-notes
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "### release"
+            echo
+            echo "- tag: \`${{ github.event.inputs.tag || github.ref_name }}\`"
+            echo "- signed, notarized and stapled; universal"
+            echo "- published as a **draft** - open the DMG on a clean Mac, then publish"
+          } >> "$GITHUB_STEP_SUMMARY"
