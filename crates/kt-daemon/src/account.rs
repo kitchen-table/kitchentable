@@ -283,6 +283,106 @@ impl Manager {
             ),
             (None, _) => {}
         }
+
+        // A stored link is a memory, not a fact. Check it once against the
+        // cloud that would have to honour it.
+        if let Some((_, _, false)) = resolved {
+            self.verify_link();
+        }
+    }
+
+    /// Ask the cloud, once, whether the link this daemon restored from disk is
+    /// one it still recognises.
+    ///
+    /// Nothing did this before, and the gap is not theoretical: a machine
+    /// linked against a development control plane on `localhost` restores
+    /// `Linked` from its own store at every subsequent start and never asks
+    /// anyone. The daemon then publishes its apps under a handle production
+    /// has never heard of, `kt account` tells the owner they are linked, and
+    /// `begin_upgrade` refuses with `AlreadyLinked` - so the one button that
+    /// could fix it is the one button that will not run. That was the exact
+    /// state of the author's machine on 2026-08-21: linked as a handle the
+    /// live control plane had no row for.
+    ///
+    /// **Only a definite negative unlinks.** A timeout, a DNS failure, a 500,
+    /// a proxy's login page - none of them mean "not linked", they mean "no
+    /// answer", and a daemon that unlinked on those would drop a paying
+    /// customer's public address every time their wifi hiccuped on the way
+    /// up. So the guard is narrow on purpose: a 2xx that parses, and says
+    /// `linked: false`. Everything else leaves the restored state exactly
+    /// where it was.
+    ///
+    /// The environment override is not checked here because it does not reach
+    /// here - `start` only calls this for a link that came from the store -
+    /// and `unlink` refuses it a second time regardless.
+    fn verify_link(self: &Arc<Self>) {
+        let Some(key) = self.install_key() else {
+            // No identity means no key to ask about. The link stays as
+            // restored; there is nothing to check it against.
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!("no runtime; not verifying the stored link");
+            return;
+        };
+
+        let manager = Arc::clone(self);
+        runtime.spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("a client with only a timeout set");
+            let url = format!("{}/v1/installs/{key}", manager.cloud.api);
+
+            let answer = match client.get(&url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    response.json::<LinkAnswer>().await.ok()
+                }
+                Ok(response) => {
+                    tracing::debug!(
+                        status = %response.status(),
+                        "the accounts API did not answer about the stored link; leaving it alone"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "could not reach the accounts API to \
+                                                 check the stored link; leaving it alone");
+                    None
+                }
+            };
+
+            let Some(answer) = answer else { return };
+
+            if answer.linked {
+                // Linked, and the cloud's handle wins if it has moved. Doing
+                // nothing when it agrees matters: `finalize` re-dials the
+                // relay, and re-dialling on every start for no reason is a
+                // reconnect storm dressed as a health check.
+                let Some(handle) = answer.handle.as_deref().and_then(valid_handle) else {
+                    return;
+                };
+                let same = matches!(
+                    &*manager.lock_link(),
+                    AccountLink::Linked { handle: have, .. } if have == &handle
+                );
+                if !same {
+                    let domain = answer.domain.unwrap_or_else(|| DEFAULT_DOMAIN.to_string());
+                    tracing::info!(%handle, "the cloud gives this install a different handle");
+                    manager.finalize(handle, domain, answer.relay_url);
+                }
+                return;
+            }
+
+            tracing::warn!(
+                "this machine had a stored link the cloud does not recognise, so it \
+                 has been forgotten; the apps that were publishing publicly are local \
+                 again and `kt account link` will start a fresh checkout"
+            );
+            if let Err(e) = manager.unlink() {
+                tracing::warn!(error = %e, "could not forget the stale link");
+            }
+        });
     }
 
     pub fn status(&self) -> AccountStatus {
@@ -579,6 +679,97 @@ mod tests {
             site: "https://site.test".into(),
             api,
         }
+    }
+
+    /// A store that already believes this machine is linked, exactly as a
+    /// restart after a checkout against some other control plane leaves it.
+    fn store_linked_as(handle: &str) -> Arc<Store> {
+        let store = Arc::new(Store::in_memory().expect("opens"));
+        store.set_setting(HANDLE_SETTING, handle).expect("sets");
+        store
+            .set_setting(DOMAIN_SETTING, "kitchentable.cloud")
+            .expect("sets");
+        store
+    }
+
+    #[tokio::test]
+    async fn a_stored_link_the_cloud_does_not_know_is_forgotten_at_startup() {
+        // The bug this exists for, in full: a machine linked against a dev
+        // control plane on localhost restores `Linked` from its own store at
+        // every start, publishes under a handle production has no row for,
+        // tells its owner they are linked, and refuses `begin_upgrade` with
+        // `AlreadyLinked` - so the one button that could fix it will not run.
+        let cloud = stub_api(Arc::new(AtomicBool::new(false)), "somebodyelse").await;
+        let manager = manager_with(cloud, store_linked_as("ajhome"), true);
+
+        manager.start();
+        assert!(
+            matches!(manager.status().link, AccountLink::Linked { .. }),
+            "restores the stored link first, because the cloud may be unreachable"
+        );
+
+        eventually("the stale link is forgotten", || {
+            matches!(manager.status().link, AccountLink::Unlinked)
+        })
+        .await;
+
+        // Forgotten on disk too, or the next start believes it all over again.
+        assert_eq!(stored(&manager.store, HANDLE_SETTING), None);
+        // And the upgrade button works again, which is the whole point.
+        assert!(manager.begin_upgrade().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_cloud_never_unlinks_a_machine() {
+        // The property that makes the check above safe to ship. No answer is
+        // not a negative answer: a daemon that unlinked on a timeout would
+        // drop a paying customer's public address every time their wifi
+        // hiccuped on the way up.
+        let manager = manager_with(nowhere(), store_linked_as("ajhome"), true);
+        manager.start();
+
+        // Long enough for the request to fail and the task to finish.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            matches!(manager.status().link, AccountLink::Linked { handle, .. } if handle == "ajhome"),
+            "an unreachable cloud must leave the restored link alone"
+        );
+        assert_eq!(
+            stored(&manager.store, HANDLE_SETTING).as_deref(),
+            Some("ajhome")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cloud_that_agrees_changes_nothing() {
+        let cloud = stub_api(Arc::new(AtomicBool::new(true)), "ajhome").await;
+        let manager = manager_with(cloud, store_linked_as("ajhome"), true);
+        manager.start();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            matches!(manager.status().link, AccountLink::Linked { handle, .. } if handle == "ajhome")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cloud_wins_when_the_handle_has_moved() {
+        // The stored handle is a cache of the cloud's answer, so the cloud is
+        // what settles a disagreement - the same rule the poll already
+        // follows when a checkout lands.
+        let cloud = stub_api(Arc::new(AtomicBool::new(true)), "renamed").await;
+        let manager = manager_with(cloud, store_linked_as("ajhome"), true);
+        manager.start();
+
+        eventually("the handle follows the cloud", || {
+            matches!(manager.status().link, AccountLink::Linked { handle, .. } if handle == "renamed")
+        })
+        .await;
+        assert_eq!(
+            stored(&manager.store, HANDLE_SETTING).as_deref(),
+            Some("renamed")
+        );
     }
 
     async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
