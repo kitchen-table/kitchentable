@@ -289,6 +289,34 @@ jobs:
           # to do here but name the target.
           pnpm -C shell tauri build --target universal-apple-darwin
 
+      - name: notarize and staple the DMG itself
+        # tauri-bundler notarizes and staples the .app, then wraps it in a DMG
+        # that it signs and nothing else. That is not enough, because the DMG
+        # is the thing a stranger downloads. A container with no ticket of its
+        # own is assessed by asking Apple over the network, so the first person
+        # to open it offline - or behind a hotel captive portal, or on the day
+        # Apple's service is slow - gets "cannot be checked for malicious
+        # software" even though the app inside is perfectly notarized.
+        #
+        # Apple already holds the hash of the app by this point, so this
+        # submission is a formality and comes back in seconds, not minutes.
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
+        run: |
+          set -euo pipefail
+          root=shell/src-tauri/target/universal-apple-darwin/release/bundle
+          dmg=$(find "$root/dmg" -maxdepth 1 -name "*.dmg" | head -1)
+          [ -n "$dmg" ] || { echo "::error::the bundler produced no dmg"; exit 1; }
+
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 30m
+          xcrun stapler staple "$dmg"
+
       # ---- prove it, rather than assume it --------------------------------
 
       - name: the artefact must actually be signed and notarized
