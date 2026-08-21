@@ -26,33 +26,75 @@ name: Release
 # of tool - Zed, Obsidian, Cursor, Raycast and Warp all distribute this way,
 # and Obsidian in particular ships its DMG straight off GitHub Releases.
 #
-# ## Nobody types a tag
+# ## Nobody types a version, either
 #
-# `version` in tauri.conf.json is the source of truth, and the tag is derived
-# from it. Bump the version, merge to main, and this decides for itself
-# whether that version has been released yet. A push that does not change the
-# version does nothing at all, so this is safe to leave on every merge.
+# The next version is computed from the last release. Merge to main and the
+# patch number goes up; nothing to bump, nothing to tag, no file to remember.
 #
-# The alternative - a human running `git tag v0.1.2 && git push --tags` - is
-# a number typed twice, and the two copies disagree eventually. Usually at the
-# least convenient moment, because the symptom is an app that reports one
-# version and downloads under another.
+# ### Why not conventional commits
 #
-# **The tag appears when the draft is published, not when it is built.**
+# The usual answer to this is release-please or semantic-release, which read
+# `feat:` and `fix:` prefixes and pick the bump for you. This repo cannot use
+# them, and the reason is in its own history: it *started* with those prefixes
+# and deliberately abandoned them around #24. The log now reads "A Mac is not
+# a phone" and "A single file is an app", which is a considered choice about
+# what a commit message is for. Machine-readable commits would mean reverting
+# it, and half the existing history would not parse regardless.
+#
+# ### Why patch-by-default is the right amount of thought
+#
+# Semantic versioning exists to tell people who write code against you whether
+# an upgrade will break them. **Nobody writes code against a Mac app.** The
+# version here has exactly two jobs: let the updater decide what is newer, and
+# give somebody a number to quote in a bug report. Both need ordering and
+# nothing else, so the elaborate breaking/feature/fix machinery buys close to
+# nothing while costing a commit convention.
+#
+# So: patch by default, and escalate deliberately when you actually want to
+# mark something, with a label on the pull request:
+#
+#     release:minor   0.4.7 -> 0.5.0
+#     release:major   0.4.7 -> 1.0.0
+#     release:skip    build nothing
+#
+# A label rather than a commit trailer because it lives on the merge, is
+# visible while reviewing, and can be corrected after the fact by anyone.
+#
+# ### Where the version actually lives
+#
+# In the GitHub Releases list, not in a file. `tauri.conf.json` and
+# `Cargo.toml` carry `0.0.0` and are overwritten at build time - so a local
+# `cargo run` honestly reports `0.0.0`, meaning "this is not a release", which
+# is more useful than a stale number that looks like one.
+#
+# The bump is not committed back to main on purpose. It would put a
+# `chore: release` commit between every pair of real ones, and this log is
+# curated.
+#
+# ### The tag appears at publish, not at build
+#
 # GitHub does not create a tag for a draft release; it creates it the moment
-# somebody presses Publish. That is unintuitive enough to be worth stating
-# twice, and it is why the "has this shipped already" check below asks about
-# releases rather than about tags - a draft has no tag to find.
+# somebody presses Publish. That is why the checks below ask about releases
+# rather than tags - a draft has no tag to find - and why the release is
+# pinned to a commit with `--target`.
 
 on:
   push:
     branches: [main]
+    # Prose changes should not ship a build. An allowlist would be the wrong
+    # shape here: forgetting to add a path means silently never releasing a
+    # change, which is worse than an occasional unnecessary build.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE-*"
   workflow_dispatch:
     inputs:
-      force:
-        description: "Build even if a release already exists for this version"
-        type: boolean
-        default: false
+      bump:
+        description: "Which part to increase"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
 # Never build two releases at once, and never cancel one half way: a killed
 # run can leave a Release created with no asset on it, which reads to a
@@ -82,40 +124,54 @@ jobs:
       - id: read
         env:
           GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ inputs.force }}
+          MANUAL_BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
 
-          version=$(node -p "require('./shell/src-tauri/tauri.conf.json').version")
-          # The crate carries the same number and nothing enforced that until
-          # now. They drift silently: the bundle takes its version from the
-          # config, so a stale Cargo.toml is invisible until somebody reads
-          # `--version` off the binary and gets a different answer.
-          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' shell/src-tauri/Cargo.toml | head -1)
-          if [ "$version" != "$crate" ]; then
-            echo "::error::tauri.conf.json says $version and Cargo.toml says $crate; they must match"
-            exit 1
-          fi
+          # Drafts count. Ours start as drafts, and skipping them would hand
+          # the same number to the next merge - two releases claiming to be
+          # the same version, one of them signed and one of them not.
+          latest=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
+                   | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                   | sort -V | tail -1 || true)
 
-          tag="v$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          # Ask about the release rather than the tag. A draft has no tag yet
-          # - GitHub creates it on publish - so checking for the tag would
-          # rebuild the same draft on every merge until somebody published it.
-          if gh release view "$tag" --json id >/dev/null 2>&1; then
-            if [ "$FORCE" = "true" ]; then
-              echo "::warning::$tag already has a release; building anyway because force was set"
-              echo "release=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "$tag already has a release. Bump the version in tauri.conf.json to ship another."
-              echo "release=false" >> "$GITHUB_OUTPUT"
-            fi
+          if [ -z "$latest" ]; then
+            # Nothing has ever shipped. Start here rather than at 0.0.1,
+            # because 0.0.0 is what an unreleased working tree says and a
+            # first release should not be indistinguishable from one.
+            next="0.1.0"
+            reason="first release"
           else
-            echo "$tag has no release yet - building it"
-            echo "release=true" >> "$GITHUB_OUTPUT"
+            bump="${MANUAL_BUMP:-}"
+            if [ -z "$bump" ]; then
+              # Labels on the pull request this merge came from. No PR - a
+              # direct push to main - simply means patch.
+              labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+                       --jq '.[].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
+              echo "labels: ${labels:-none}"
+              case " $labels " in
+                *" release:skip "*)  echo "release=false" >> "$GITHUB_OUTPUT"
+                                     echo "labelled release:skip - building nothing"
+                                     exit 0 ;;
+                *" release:major "*) bump=major ;;
+                *" release:minor "*) bump=minor ;;
+                *)                   bump=patch ;;
+              esac
+            fi
+
+            IFS=. read -r major minor patch <<< "$latest"
+            case "$bump" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="$major.$((minor + 1)).0" ;;
+              patch) next="$major.$minor.$((patch + 1))" ;;
+            esac
+            reason="$bump on $latest"
           fi
+
+          echo "version=$next"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$next"     >> "$GITHUB_OUTPUT"
+          echo "release=true"   >> "$GITHUB_OUTPUT"
+          echo "next version is $next ($reason)"
 
   release:
     needs: decide
@@ -154,6 +210,37 @@ jobs:
         run: cargo test --workspace --locked
 
       # ---- the build ------------------------------------------------------
+
+      - name: stamp the computed version into the build
+        # The two version fields in the repo say 0.0.0 and are replaced here,
+        # so the number a customer sees comes from the release history rather
+        # than from whichever file somebody remembered to edit. Writing both
+        # in one place also ends the drift between them for good: they cannot
+        # disagree if nothing ever edits them separately.
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Both edits replace only the first matching line and leave the rest
+          # of the file byte-for-byte alone. Round-tripping the config through
+          # a JSON parser would be safer against malformed input and would
+          # also reformat every array in it, which turns a one-line change
+          # into an unreadable diff the moment anyone inspects a build.
+          perl -i -pe 'if (!$done && s/^(\s*"version":\s*)"[^"]*"/$1"'"$VERSION"'"/) { $done = 1 }' \
+            shell/src-tauri/tauri.conf.json
+          # The first `version =` is the [package] one. Dependencies pinned to
+          # a version further down the file must not be rewritten.
+          perl -i -pe 'if (!$done && s/^version = ".*"/version = "'"$VERSION"'"/) { $done = 1 }' \
+            shell/src-tauri/Cargo.toml
+
+          # Prove the config is still parseable rather than assuming it. A
+          # regex that half-matched would otherwise surface as a Tauri error
+          # much later, with nothing pointing back at this step.
+          node -p 'require("./shell/src-tauri/tauri.conf.json").version' >/dev/null
+
+          echo "tauri.conf.json -> $(node -p 'require("./shell/src-tauri/tauri.conf.json").version')"
+          echo "Cargo.toml      -> $(sed -n 's/^version = "\(.*\)"/\1/p' shell/src-tauri/Cargo.toml | head -1)"
 
       - name: put the API key on disk
         # notarytool wants a file, and a secret is a string. Written to the
