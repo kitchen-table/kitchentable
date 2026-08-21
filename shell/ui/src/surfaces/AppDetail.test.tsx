@@ -376,18 +376,23 @@ describe("AppDetail", () => {
     expect(screen.queryByText(/^or 192\.168\.0\.5/)).toBeNull();
   });
 
-  it("explains a missing entry file, on every tab", () => {
-    // The only failure with no visible symptom until someone taps the link.
+  it("says a folder with no page opens as a list, on every tab", () => {
+    // Not an alarm any more: the daemon serves a listing rather than a 404
+    // (kt-server's `listing`). Still said on every tab, because "your link
+    // opens a file list, not a page" is a thing to know before sending it.
     const { unmount } = show({ entry: "index.html", entry_exists: false }, "devices");
 
-    const alert = screen.getByRole("alert");
-    expect(alert.textContent).toContain("no page to open");
-    expect(alert.textContent).toContain("index.html");
-    expect(alert.textContent).toContain("/ws/Trip Planner");
+    const note = screen.getByRole("note");
+    expect(note.textContent).toContain("opens as a list");
+    expect(note.textContent).toContain("index.html");
+    expect(note.textContent).toContain("/ws/Trip Planner");
+    // It no longer claims the address 404s, because it does not.
+    expect(note.textContent).not.toContain("404");
+    expect(screen.queryByRole("alert")).toBeNull();
     unmount();
 
     show({ entry_exists: true });
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("note")).toBeNull();
   });
 
   it("says so when nothing has happened yet", async () => {

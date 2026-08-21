@@ -241,20 +241,25 @@ export function AppDetail({
 }
 
 /**
- * The one failure that hides completely.
+ * What a folder with no page of its own does instead.
  *
- * An app with no entry file is registered, announced and gated exactly like a
- * working one; the only symptom is a 404, on a phone, after someone has already
- * been sent the link. So it is stated at the top of every tab, with both fixes
- * spelled out rather than described.
+ * This used to be the one failure that hid completely: the app was registered,
+ * announced and gated exactly like a working one, and the only symptom was a
+ * 404 on a phone, after someone had already been sent the link. It is not a
+ * failure any more - the daemon serves a listing of the folder (kt-server's
+ * `listing`), which is what makes a folder of photos shareable.
+ *
+ * So this is a note rather than an alarm. It still appears on every tab,
+ * because "your link opens a file list, not a page" is a thing the owner
+ * should know before they send it, and the way to change it is worth saying.
  */
 function NoEntry({ app }: { app: App }) {
   return (
     <div
-      role="alert"
+      role="note"
       style={{
-        background: "var(--danger-tint)",
-        border: "1px solid var(--danger)",
+        background: "var(--chip)",
+        border: "1px solid var(--border)",
         borderRadius: 12,
         padding: 16,
         marginBottom: 20,
@@ -263,16 +268,18 @@ function NoEntry({ app }: { app: App }) {
       <div
         style={{
           font: "700 13.5px var(--font-sans)",
-          color: "var(--danger)",
+          color: "var(--ink)",
           marginBottom: 5,
         }}
       >
-        This app has no page to open
+        This folder opens as a list of its files
       </div>
       <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--ink2)" }}>
-        Its folder has no{" "}
-        <code style={{ fontFamily: "var(--font-mono)" }}>{app.entry}</code>, so the
-        address above answers 404. Either rename a page in the folder to{" "}
+        There is no{" "}
+        <code style={{ fontFamily: "var(--font-mono)" }}>{app.entry}</code> in it, so
+        the address above shows what is in the folder - a grid if it is all images,
+        a list otherwise - and each item opens on its own. Nothing is written to
+        your folder. To open on a page of your own instead, add an{" "}
         <code style={{ fontFamily: "var(--font-mono)" }}>{app.entry}</code>, or point{" "}
         <code style={{ fontFamily: "var(--font-mono)" }}>entry</code> in{" "}
         <code style={{ fontFamily: "var(--font-mono)" }}>app.json</code> at the file
