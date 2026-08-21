@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "kitchentable-shell"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "kt-types",
  "mac-usernotifications",
