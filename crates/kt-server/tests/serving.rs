@@ -53,6 +53,14 @@ impl Fixture {
         std::fs::create_dir_all(&chores).expect("creates dirs");
         std::fs::write(chores.join("index.html"), "<h1>chores</h1>").expect("writes");
 
+        // A folder of photos and nothing else: no page anywhere in it. This is
+        // the shape that used to 404 at its own front door.
+        let album = dir.join("album");
+        std::fs::create_dir_all(album.join("summer")).expect("creates dirs");
+        std::fs::write(album.join("one.png"), "PNG").expect("writes");
+        std::fs::write(album.join("two.jpg"), "JPG").expect("writes");
+        std::fs::write(album.join("summer/beach.png"), "PNG").expect("writes");
+
         Self {
             apps: vec![
                 ServedApp {
@@ -73,6 +81,19 @@ impl Fixture {
                     slug: "chores".into(),
                     name: "Chores Rota".into(),
                     root: chores.canonicalize().expect("canonicalises"),
+                    entry: "index.html".into(),
+                    visibility: kt_types::Visibility::Public,
+                    paused: false,
+                },
+                ServedApp {
+                    relay: Default::default(),
+                    storage: Default::default(),
+                    storage_backup: true,
+                    slug: "album".into(),
+                    name: "Album".into(),
+                    root: album.canonicalize().expect("canonicalises"),
+                    // The entry the registry defaults to when it cannot choose.
+                    // Nothing by this name exists in the folder.
                     entry: "index.html".into(),
                     visibility: kt_types::Visibility::Public,
                     paused: false,
@@ -344,4 +365,66 @@ async fn traversal_is_refused_on_an_app_hostname_too() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} should be refused");
         assert!(!body.contains("PRIVATE"), "{uri} leaked");
     }
+}
+
+// ---- folders with no page of their own -------------------------------------
+
+#[tokio::test]
+async fn a_folder_of_photos_opens_on_a_listing_instead_of_404() {
+    let fixture = Arc::new(Fixture::new());
+    let (status, body, _) = get(fixture, "/album/").await;
+
+    assert_eq!(status, StatusCode::OK, "this used to be the 404 nobody saw");
+    assert!(body.contains("one.png"), "the photos are listed: {body}");
+    assert!(body.contains("two.jpg"));
+    assert!(body.contains("class=\"grid\""), "all images, so a grid");
+    assert!(body.contains("Album"), "titled with the app's name");
+}
+
+#[tokio::test]
+async fn the_listing_is_a_live_page_like_any_other() {
+    let fixture = Arc::new(Fixture::new());
+    let (_, body, _) = get(fixture, "/album/").await;
+    // Dropping a real index.html in should make the open tab notice, and that
+    // only works if the generated page carries the live tag too.
+    assert!(
+        body.contains("/__kt/live.js"),
+        "the listing reloads like a page"
+    );
+}
+
+#[tokio::test]
+async fn a_subfolder_of_a_pageless_app_lists_too() {
+    let fixture = Arc::new(Fixture::new());
+    let (status, body, _) = get(fixture, "/album/summer/").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("beach.png"));
+    assert!(body.contains("summer"), "it says where you are");
+}
+
+#[tokio::test]
+async fn an_app_with_a_real_page_never_becomes_browsable() {
+    let fixture = Arc::new(Fixture::new());
+    // `trip` has an index.html at its root, so `sub/` follows its own entry...
+    let (status, body, _) = get(Arc::clone(&fixture), "/trip/sub/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(served(&body, "<h1>sub</h1>"), "the page, not a listing");
+    assert!(!body.contains("class=\"grid\""));
+    assert!(
+        !body.contains("style.css"),
+        "and its assets are not enumerated"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_directory_is_still_a_flat_404() {
+    let fixture = Arc::new(Fixture::new());
+    // Listing exists for folders that are really there. Inventing one for a
+    // path that is not would answer a question the 404 refuses to answer.
+    let (status, _, _) = get(Arc::clone(&fixture), "/album/nope/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = get(fixture, "/album/../").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "and traversal is unchanged");
 }

@@ -14,6 +14,17 @@ pub enum ResolveError {
     Escapes,
     /// Nothing is there.
     NotFound,
+    /// A real directory inside the app, with no entry file in it.
+    ///
+    /// Distinct from `NotFound` because it is the one miss the caller can do
+    /// something better with than a 404: the folder exists and is the owner's
+    /// to share, so it can be listed. Carries the directory so the caller does
+    /// not have to resolve it a second time.
+    ///
+    /// This does *not* weaken the deliberate collapsing of `NotFound` and
+    /// `Escapes`. Both of those still say only "no", and this variant is
+    /// reachable only for a path already proven to be inside `root`.
+    NoEntry(PathBuf),
 }
 
 /// Resolve `requested` inside `root`, or refuse.
@@ -61,19 +72,23 @@ pub fn resolve(root: &Path, requested: &str) -> Result<PathBuf, ResolveError> {
 ///
 /// `/` and `/subdir/` both land on `entry` inside that directory, which is what
 /// makes a plain folder of HTML work with no configuration.
+///
+/// A directory with no entry file in it comes back as `NoEntry` rather than
+/// `NotFound`, so the caller can list it instead of refusing. Whether it
+/// *should* is the caller's decision, not this function's.
 pub fn resolve_file(root: &Path, requested: &str, entry: &str) -> Result<PathBuf, ResolveError> {
     let resolved = resolve(root, requested.trim_start_matches('/'))?;
 
     if resolved.is_dir() {
         let with_entry = resolved.join(entry);
-        let canonical = with_entry
-            .canonicalize()
-            .map_err(|_| ResolveError::NotFound)?;
+        let Ok(canonical) = with_entry.canonicalize() else {
+            return Err(ResolveError::NoEntry(resolved));
+        };
         if !canonical.starts_with(root) {
             return Err(ResolveError::Escapes);
         }
         if canonical.is_dir() {
-            return Err(ResolveError::NotFound);
+            return Err(ResolveError::NoEntry(resolved));
         }
         return Ok(canonical);
     }
@@ -231,11 +246,28 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_without_an_entry_point_is_not_found() {
+    fn a_directory_without_an_entry_point_says_which_directory() {
+        // It used to be a flat NotFound. The caller can serve a listing for a
+        // folder that is really there, so it needs telling apart from a miss -
+        // and it needs the path, to avoid resolving it twice.
         let f = Fixture::new();
-        std::fs::create_dir_all(f.root.join("empty")).expect("creates");
+        let empty = f.root.join("empty");
+        std::fs::create_dir_all(&empty).expect("creates");
         assert_eq!(
             resolve_file(&f.root, "/empty/", "index.html"),
+            Err(ResolveError::NoEntry(
+                empty.canonicalize().expect("canonical")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_still_a_plain_miss() {
+        // The distinction above must not become a way to ask whether a path
+        // exists: only a real directory inside the root gets the richer answer.
+        let f = Fixture::new();
+        assert_eq!(
+            resolve_file(&f.root, "/nope/", "index.html"),
             Err(ResolveError::NotFound)
         );
     }
