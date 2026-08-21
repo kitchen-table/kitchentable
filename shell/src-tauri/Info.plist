@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Merged into the generated Info.plist by tauri-bundler, which looks for this
+  file beside tauri.conf.json without being told to. Everything Tauri derives
+  from the config - bundle id, version, minimum system version, icon - stays
+  where it is; this file carries only what Tauri cannot know.
+
+  Both keys below are about the local network, and both are load-bearing on
+  macOS 15 and later. Without them the system refuses local-network access,
+  and it does so *silently*: no error, no dialog, no log line worth finding.
+
+  This is the failure nobody catches in development. A developer's Mac has
+  already granted local-network permission to the terminal the daemon is run
+  from, so every test passes; a clean install has granted nothing, and what
+  breaks there is the phone moment - which is the one thing this product is
+  demonstrated by.
+-->
+<plist version="1.0">
+<dict>
+  <!--
+    Shown in the system's permission dialog, so it is read by a person who is
+    deciding whether to trust this app - not by us. Plain sentence, says what
+    is actually done and why, no jargon and no reassurance nobody asked for.
+  -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Kitchen Table opens your apps to the phones and computers on this network, and looks for those devices so it can show you their names instead of their addresses.</string>
+
+  <!--
+    Every service type the daemon browses, taken from `SERVICES` in
+    crates/kt-mdns/src/discover.rs. macOS only permits the types listed here,
+    and it does not complain about the ones that are missing - a type left out
+    simply never returns a result, so device names come back empty and the
+    pairing screen shows addresses.
+
+    Keep this list and that array in step. If a type is added there and not
+    here, the symptom is a feature that quietly does less on a customer's Mac
+    than it does on yours.
+  -->
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_companion-link._tcp</string>
+    <string>_airplay._tcp</string>
+    <string>_smb._tcp</string>
+    <string>_device-info._tcp</string>
+    <string>_workstation._tcp</string>
+  </array>
+</dict>
+</plist>

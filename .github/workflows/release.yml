@@ -1,0 +1,399 @@
+name: Release
+
+# A signed, notarized, stapled, universal DMG, attached to a GitHub Release.
+#
+# ## What this is not
+#
+# It is not the first thing to run. Notarization fails for small, tedious
+# reasons - an unsigned sidecar, a missing entitlement, a hardened-runtime
+# rejection - and every one of them is quicker to find on a laptop than
+# through a CI log. Do one signed build by hand first, install it on a Mac
+# that has never seen this project, and only then let this file automate what
+# already worked.
+#
+# ## Why the checks run again here
+#
+# CI ran them on the commit. This runs them on the tag, because a release that
+# trusts a green tick from an earlier run is a release that ships whatever
+# raced past it. They cost minutes and they are the last chance.
+#
+# ## Distribution
+#
+# Direct download, Developer ID signed, from GitHub Releases. Not the Mac App
+# Store: this app runs a sidecar daemon that serves folders from the user's
+# disk over the local network, which the App Store sandbox makes very hard and
+# review is unlikely to accept. That is also the ordinary shape for this kind
+# of tool - Zed, Obsidian, Cursor, Raycast and Warp all distribute this way,
+# and Obsidian in particular ships its DMG straight off GitHub Releases.
+#
+# ## Nobody types a version, either
+#
+# The next version is computed from the last release. Merge to main and the
+# patch number goes up; nothing to bump, nothing to tag, no file to remember.
+#
+# ### Why not conventional commits
+#
+# The usual answer to this is release-please or semantic-release, which read
+# `feat:` and `fix:` prefixes and pick the bump for you. This repo cannot use
+# them, and the reason is in its own history: it *started* with those prefixes
+# and deliberately abandoned them around #24. The log now reads "A Mac is not
+# a phone" and "A single file is an app", which is a considered choice about
+# what a commit message is for. Machine-readable commits would mean reverting
+# it, and half the existing history would not parse regardless.
+#
+# ### Why patch-by-default is the right amount of thought
+#
+# Semantic versioning exists to tell people who write code against you whether
+# an upgrade will break them. **Nobody writes code against a Mac app.** The
+# version here has exactly two jobs: let the updater decide what is newer, and
+# give somebody a number to quote in a bug report. Both need ordering and
+# nothing else, so the elaborate breaking/feature/fix machinery buys close to
+# nothing while costing a commit convention.
+#
+# So: patch by default, and escalate deliberately when you actually want to
+# mark something, with a label on the pull request:
+#
+#     release:minor   0.4.7 -> 0.5.0
+#     release:major   0.4.7 -> 1.0.0
+#     release:skip    build nothing
+#
+# A label rather than a commit trailer because it lives on the merge, is
+# visible while reviewing, and can be corrected after the fact by anyone.
+#
+# ### Where the version actually lives
+#
+# In the GitHub Releases list, not in a file. `tauri.conf.json` and
+# `Cargo.toml` carry `0.0.0` and are overwritten at build time - so a local
+# `cargo run` honestly reports `0.0.0`, meaning "this is not a release", which
+# is more useful than a stale number that looks like one.
+#
+# The bump is not committed back to main on purpose. It would put a
+# `chore: release` commit between every pair of real ones, and this log is
+# curated.
+#
+# ### The tag appears at publish, not at build
+#
+# GitHub does not create a tag for a draft release; it creates it the moment
+# somebody presses Publish. That is why the checks below ask about releases
+# rather than tags - a draft has no tag to find - and why the release is
+# pinned to a commit with `--target`.
+
+on:
+  push:
+    branches: [main]
+    # Prose changes should not ship a build. An allowlist would be the wrong
+    # shape here: forgetting to add a path means silently never releasing a
+    # change, which is worse than an occasional unnecessary build.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE-*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part to increase"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+# Never build two releases at once, and never cancel one half way: a killed
+# run can leave a Release created with no asset on it, which reads to a
+# visitor as a broken download rather than an absent one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # creates the Release and uploads the DMG
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Cheap, and on Linux, because most pushes stop here. Deciding on the macOS
+  # runner would spend a minute of the expensive machine to answer "no".
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      release: ${{ steps.read.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # Drafts count. Ours start as drafts, and skipping them would hand
+          # the same number to the next merge - two releases claiming to be
+          # the same version, one of them signed and one of them not.
+          latest=$(gh release list --limit 100 --json tagName --jq '.[].tagName' \
+                   | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+                   | sort -V | tail -1 || true)
+
+          if [ -z "$latest" ]; then
+            # Nothing has ever shipped. Start here rather than at 0.0.1,
+            # because 0.0.0 is what an unreleased working tree says and a
+            # first release should not be indistinguishable from one.
+            next="0.1.0"
+            reason="first release"
+          else
+            bump="${MANUAL_BUMP:-}"
+            if [ -z "$bump" ]; then
+              # Labels on the pull request this merge came from. No PR - a
+              # direct push to main - simply means patch.
+              labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+                       --jq '.[].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
+              echo "labels: ${labels:-none}"
+              case " $labels " in
+                *" release:skip "*)  echo "release=false" >> "$GITHUB_OUTPUT"
+                                     echo "labelled release:skip - building nothing"
+                                     exit 0 ;;
+                *" release:major "*) bump=major ;;
+                *" release:minor "*) bump=minor ;;
+                *)                   bump=patch ;;
+              esac
+            fi
+
+            IFS=. read -r major minor patch <<< "$latest"
+            case "$bump" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="$major.$((minor + 1)).0" ;;
+              patch) next="$major.$minor.$((patch + 1))" ;;
+            esac
+            reason="$bump on $latest"
+          fi
+
+          echo "version=$next"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$next"     >> "$GITHUB_OUTPUT"
+          echo "release=true"   >> "$GITHUB_OUTPUT"
+          echo "next version is $next ($reason)"
+
+  release:
+    needs: decide
+    if: needs.decide.outputs.release == 'true'
+    # The macOS runner is Apple silicon; the universal target is what makes
+    # the result run on Intel too. `stage-daemon.mjs` builds both daemon
+    # arches and lipos them for exactly this reason.
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            shell/src-tauri
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      # ---- the build ------------------------------------------------------
+
+      - name: stamp the computed version into the build
+        # The two version fields in the repo say 0.0.0 and are replaced here,
+        # so the number a customer sees comes from the release history rather
+        # than from whichever file somebody remembered to edit. Writing both
+        # in one place also ends the drift between them for good: they cannot
+        # disagree if nothing ever edits them separately.
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Both edits replace only the first matching line and leave the rest
+          # of the file byte-for-byte alone. Round-tripping the config through
+          # a JSON parser would be safer against malformed input and would
+          # also reformat every array in it, which turns a one-line change
+          # into an unreadable diff the moment anyone inspects a build.
+          perl -i -pe 'if (!$done && s/^(\s*"version":\s*)"[^"]*"/$1"'"$VERSION"'"/) { $done = 1 }' \
+            shell/src-tauri/tauri.conf.json
+          # The first `version =` is the [package] one. Dependencies pinned to
+          # a version further down the file must not be rewritten.
+          perl -i -pe 'if (!$done && s/^version = ".*"/version = "'"$VERSION"'"/) { $done = 1 }' \
+            shell/src-tauri/Cargo.toml
+
+          # Prove the config is still parseable rather than assuming it. A
+          # regex that half-matched would otherwise surface as a Tauri error
+          # much later, with nothing pointing back at this step.
+          node -p 'require("./shell/src-tauri/tauri.conf.json").version' >/dev/null
+
+          echo "tauri.conf.json -> $(node -p 'require("./shell/src-tauri/tauri.conf.json").version')"
+          echo "Cargo.toml      -> $(sed -n 's/^version = "\(.*\)"/\1/p' shell/src-tauri/Cargo.toml | head -1)"
+
+      - name: put the API key on disk
+        # notarytool wants a file, and a secret is a string. Written to the
+        # runner's temp directory rather than the workspace so it cannot be
+        # picked up by a build step or an artefact upload, and the runner is
+        # destroyed afterwards regardless.
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$RUNNER_TEMP/asc-api-key.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc-api-key.p8"
+          # Prove it decoded to a key rather than to nothing. A malformed
+          # secret would otherwise surface much later as a notarization
+          # failure that reads like a credentials problem.
+          openssl pkey -in "$RUNNER_TEMP/asc-api-key.p8" -noout
+
+      - name: build, sign and notarize
+        env:
+          # The Developer ID certificate, exported as .p12 and base64'd. The
+          # runner imports it into a temporary keychain and throws it away
+          # with the machine.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # The full identity string, e.g.
+          #   Developer ID Application: Some Name (ABCDE12345)
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Notarization by App Store Connect API key rather than by Apple ID
+          # and an app-specific password. Deliberately: an app-specific
+          # password belongs to one person, dies with their 2FA device or
+          # their leaving date, and cannot be rotated by anybody else. A team
+          # key belongs to the team.
+          #
+          # Neither the issuer nor the key id is secret - both appear in the
+          # App Store Connect UI to anyone with access. They live in secrets
+          # only so that rotating the key is one place rather than three.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
+        run: |
+          set -euo pipefail
+          # Hardened runtime is on by default in tauri-bundler and must stay
+          # on: notarization refuses a build without it. beforeBuildCommand
+          # builds the UI and stages the universal daemon, so there is nothing
+          # to do here but name the target.
+          pnpm -C shell tauri build --target universal-apple-darwin
+
+      # ---- prove it, rather than assume it --------------------------------
+
+      - name: the artefact must actually be signed and notarized
+        # The whole point of these three commands is that an unsigned or
+        # un-notarized build looks *exactly* like a good one until somebody
+        # downloads it onto a Mac that is not this one. A release that ships
+        # a Gatekeeper wall is worse than a release that fails here.
+        run: |
+          set -euo pipefail
+          root=shell/src-tauri/target/universal-apple-darwin/release/bundle
+          app=$(find "$root/macos" -maxdepth 1 -name "*.app" | head -1)
+          dmg=$(find "$root/dmg" -maxdepth 1 -name "*.dmg" | head -1)
+          echo "app=$app"
+          echo "dmg=$dmg"
+          [ -n "$app" ] && [ -n "$dmg" ] || { echo "::error::no app or dmg was produced"; exit 1; }
+
+          echo "--- the signature covers everything, sidecar included ---"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          echo "--- Gatekeeper would let a stranger open it ---"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          echo "--- the notarization ticket is stapled, so it opens offline ---"
+          xcrun stapler validate "$dmg"
+
+          echo "--- and it really is universal ---"
+          lipo -archs "$app/Contents/MacOS/kt-daemon"
+
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+
+      - name: the local-network keys must be in the bundle
+        # Info.plist is merged by the bundler, and a merge that silently did
+        # nothing would produce an app that works on every developer's Mac and
+        # fails the phone moment on every clean one. Check the keys are there
+        # rather than trusting that the file was picked up.
+        run: |
+          set -euo pipefail
+          root=shell/src-tauri/target/universal-apple-darwin/release/bundle
+          plist="$(find "$root/macos" -maxdepth 1 -name "*.app" | head -1)/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSLocalNetworkUsageDescription" "$plist"
+          /usr/libexec/PlistBuddy -c "Print :NSBonjourServices" "$plist"
+
+      # ---- publish --------------------------------------------------------
+
+      - name: name the download so a link to it can be permanent
+        # Tauri produces "Kitchen Table_0.1.0_aarch64.dmg" - a space, and the
+        # version baked into the filename. Both matter, because GitHub serves
+        #
+        #   /releases/latest/download/<asset-name>
+        #
+        # which always resolves to the newest published release. That is the
+        # URL the landing page wants: set once, correct forever, nothing to
+        # update at each release. It only works while the asset name stays
+        # identical between releases, so a versioned filename would silently
+        # break the download button every time we shipped.
+        #
+        # Both names are uploaded. The stable one is what the site links to;
+        # the versioned one is what somebody wants when they need to install
+        # exactly 0.3.1 again, and it keeps the space out of that URL too.
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload"
+          mkdir -p "$out"
+          cp "$DMG" "$out/KitchenTable.dmg"
+          cp "$DMG" "$out/KitchenTable-$VERSION-universal.dmg"
+          ls -la "$out"
+          echo "STABLE_DMG=$out/KitchenTable.dmg" >> "$GITHUB_ENV"
+          echo "VERSIONED_DMG=$out/KitchenTable-$VERSION-universal.dmg" >> "$GITHUB_ENV"
+
+      - name: attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # `--target` pins the tag to the commit this was built from, which
+          # matters because the tag does not exist yet: GitHub creates it when
+          # the draft is published, and without this it would be created
+          # against whatever main has moved on to by then.
+          #
+          # Draft on purpose. The last check on a Mac app is a human opening
+          # it, and publishing is one click once somebody has. Until then the
+          # landing page's download button must not find it.
+          gh release create "$TAG" "$STABLE_DMG" "$VERSIONED_DMG" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes
+
+      - name: summary
+        if: always()
+        env:
+          TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          {
+            echo "### release"
+            echo
+            echo "- version: \`$TAG\` (from tauri.conf.json)"
+            echo "- signed, notarized and stapled; universal"
+            echo "- created as a **draft**, so no tag exists yet"
+            echo "- open the DMG on a clean Mac, then press Publish - that is what creates the tag"
+            echo
+            echo "Once published, the landing page's permanent link resolves:"
+            echo
+            echo "    https://github.com/$GITHUB_REPOSITORY/releases/latest/download/KitchenTable.dmg"
+          } >> "$GITHUB_STEP_SUMMARY"
