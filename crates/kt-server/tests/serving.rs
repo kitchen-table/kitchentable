@@ -387,7 +387,10 @@ async fn the_listing_is_a_live_page_like_any_other() {
     let (_, body, _) = get(fixture, "/album/").await;
     // Dropping a real index.html in should make the open tab notice, and that
     // only works if the generated page carries the live tag too.
-    assert!(body.contains("/__kt/live.js"), "the listing reloads like a page");
+    assert!(
+        body.contains("/__kt/live.js"),
+        "the listing reloads like a page"
+    );
 }
 
 #[tokio::test]
@@ -408,7 +411,10 @@ async fn an_app_with_a_real_page_never_becomes_browsable() {
     assert_eq!(status, StatusCode::OK);
     assert!(served(&body, "<h1>sub</h1>"), "the page, not a listing");
     assert!(!body.contains("class=\"grid\""));
-    assert!(!body.contains("style.css"), "and its assets are not enumerated");
+    assert!(
+        !body.contains("style.css"),
+        "and its assets are not enumerated"
+    );
 }
 
 #[tokio::test]

@@ -194,7 +194,11 @@ pub fn render(app_name: &str, subpath: &str, dir: &Path) -> String {
     let heading = if subpath.is_empty() {
         escape(app_name)
     } else {
-        format!("{} <span class=\"sub\">/{}</span>", escape(app_name), escape(subpath))
+        format!(
+            "{} <span class=\"sub\">/{}</span>",
+            escape(app_name),
+            escape(subpath)
+        )
     };
     let count = match items.len() {
         1 => "1 item".to_string(),
@@ -303,7 +307,9 @@ mod tests {
     #[test]
     fn a_folder_of_photos_becomes_a_grid() {
         let dir = Dir::new("photos");
-        dir.file("one.png", b"x").file("TWO.JPG", b"x").file("three.webp", b"x");
+        dir.file("one.png", b"x")
+            .file("TWO.JPG", b"x")
+            .file("three.webp", b"x");
 
         let html = render("PNG", "", &dir.0);
         assert!(html.contains("class=\"grid\""), "all images means a grid");
@@ -321,8 +327,14 @@ mod tests {
         dir.file("one.png", b"x").dir("summer");
 
         let html = render("Album", "", &dir.0);
-        assert!(html.contains("class=\"grid\""), "a tidy album is still an album");
-        assert!(html.contains("class=\"folder\""), "the subfolder gets a tile");
+        assert!(
+            html.contains("class=\"grid\""),
+            "a tidy album is still an album"
+        );
+        assert!(
+            html.contains("class=\"folder\""),
+            "the subfolder gets a tile"
+        );
         assert!(html.contains("href=\"summer/\""));
     }
 
@@ -331,7 +343,10 @@ mod tests {
         let dir = Dir::new("dirs");
         dir.dir("a").dir("b");
         let html = render("Dirs", "", &dir.0);
-        assert!(html.contains("class=\"list\""), "no images, nothing to grid");
+        assert!(
+            html.contains("class=\"list\""),
+            "no images, nothing to grid"
+        );
     }
 
     #[test]
@@ -340,7 +355,10 @@ mod tests {
         dir.file("notes.txt", &[0u8; 2048]).file("photo.png", b"x");
 
         let html = render("Mixed", "", &dir.0);
-        assert!(html.contains("class=\"list\""), "not all images means a list");
+        assert!(
+            html.contains("class=\"list\""),
+            "not all images means a list"
+        );
         assert!(!html.contains("class=\"grid\""));
         assert!(html.contains("2.0 KB"), "sizes are shown: {html}");
     }
@@ -354,7 +372,10 @@ mod tests {
         let folder_at = html.find("zzz-folder").expect("folder is listed");
         let file_at = html.find("a-file.txt").expect("file is listed");
         assert!(folder_at < file_at, "folders come first regardless of name");
-        assert!(html.contains("href=\"zzz-folder/\""), "folders get a trailing slash");
+        assert!(
+            html.contains("href=\"zzz-folder/\""),
+            "folders get a trailing slash"
+        );
         assert!(html.contains("folder</span>"));
     }
 
@@ -366,7 +387,10 @@ mod tests {
             .file("visible.png", b"x");
 
         let html = render("Hidden", "", &dir.0);
-        assert!(!html.contains(".env"), "a listing must not invent a way to leak dotfiles");
+        assert!(
+            !html.contains(".env"),
+            "a listing must not invent a way to leak dotfiles"
+        );
         assert!(!html.contains("app.json"), "app.json is ours, not theirs");
         assert!(html.contains("visible.png"));
         assert!(html.contains("1 item"), "and the count agrees: {html}");
@@ -376,7 +400,8 @@ mod tests {
     fn names_are_escaped_and_urls_encoded() {
         let dir = Dir::new("nasty");
         // A filename that is also an injection attempt, and one with a space.
-        dir.file("<script>.txt", b"x").file("holiday snap.txt", b"x");
+        dir.file("<script>.txt", b"x")
+            .file("holiday snap.txt", b"x");
 
         let html = render("Nasty", "", &dir.0);
         assert!(!html.contains("<script>"), "the name must not become a tag");

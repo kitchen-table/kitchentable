@@ -19,10 +19,10 @@ use axum::{
 };
 
 pub mod gate;
+pub mod listing;
 pub mod live;
 pub mod pages;
 pub mod paths;
-pub mod listing;
 pub mod presence;
 pub mod storage;
 
