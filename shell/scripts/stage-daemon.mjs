@@ -61,12 +61,21 @@ function build(triple) {
 }
 
 /**
- * A universal build needs a universal daemon.
+ * A universal build needs a universal daemon - and both thin ones beside it.
  *
  * Tauri builds the shell for both architectures and lipos them; the sidecar is
  * handed over as a finished file, so this has to do the same for the daemon.
  * An arm64-only daemon inside a universal app is an Intel Mac that installs
  * cleanly and then cannot serve anything.
+ *
+ * The catch only appears under `--target universal-apple-darwin`, which is why
+ * a host-triple build never found it. `beforeBuildCommand` runs *once*, with
+ * the triple set to `universal-apple-darwin` - but the cargo builds underneath
+ * run *per architecture*, and `tauri-build`'s build script reads cargo's own
+ * `TARGET` and refuses to compile unless `binaries/kt-daemon-<that arch>`
+ * exists. The bundler runs later, against `universal-apple-darwin`, and is
+ * what actually copies a file into `Contents/MacOS/`. So all three names are
+ * needed: two thin ones to get the shell to compile, one fat one to ship.
  */
 function stage() {
   mkdirSync(staging, { recursive: true });
@@ -74,7 +83,14 @@ function stage() {
   const destination = join(staging, `kt-daemon-${triple}`);
 
   if (triple === "universal-apple-darwin") {
-    const parts = ["aarch64-apple-darwin", "x86_64-apple-darwin"].map(build);
+    const parts = ["aarch64-apple-darwin", "x86_64-apple-darwin"].map((arch) => {
+      const built = build(arch);
+      // The thin copy that arch's own cargo build will look for by name.
+      const thin = join(staging, `kt-daemon-${arch}`);
+      copyFileSync(built, thin);
+      chmodSync(thin, 0o755);
+      return built;
+    });
     execFileSync("lipo", ["-create", "-output", destination, ...parts], {
       stdio: "inherit",
     });
