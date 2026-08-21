@@ -276,14 +276,25 @@ def package(cer: Path, key_pem: Path, out: Path) -> None:
     identity = subject.split("CN=", 1)[1].split(", OU=", 1)[0].strip() if "CN=" in subject else "?"
     team = subject.split("OU=", 1)[1].split(",", 1)[0].strip() if "OU=" in subject else "?"
 
-    print(f"\nbuilt {p12}\n")
-    print("Set these, then delete the working directory:\n")
+    # The passphrase goes to a file rather than to the screen. Printing it
+    # would put it in a terminal transcript, a scrollback buffer and quite
+    # possibly a chat log, all of which outlive the ten seconds it is needed
+    # for - and it protects the one file that must never be readable.
+    secret_file = out / "p12-passphrase.txt"
+    secret_file.write_text(passphrase)
+    secret_file.chmod(0o600)
+
+    print(f"\nbuilt {p12}")
+    print(f"identity  {identity}")
+    print(f"team      {team}")
+    print(f"\nPassphrase written to {secret_file} - not printed on purpose.\n")
+    print("Set the four secrets:\n")
     repo = "kitchen-table/kitchentable"
     print(f"  base64 -i {p12} | gh secret set APPLE_CERTIFICATE --repo {repo}")
-    print(f"  printf %s '{passphrase}' | gh secret set APPLE_CERTIFICATE_PASSWORD --repo {repo}")
+    print(f"  gh secret set APPLE_CERTIFICATE_PASSWORD --repo {repo} < {secret_file}")
     print(f"  printf %s '{identity}' | gh secret set APPLE_SIGNING_IDENTITY --repo {repo}")
     print(f"  printf %s '{team}' | gh secret set APPLE_TEAM_ID --repo {repo}")
-    print(f"\nBack up {p12} and its passphrase somewhere durable first.")
+    print(f"\nBack up {p12} and {secret_file} somewhere durable before deleting them.")
     print("Losing the private key means burning one of five Developer ID certificates.")
 
 

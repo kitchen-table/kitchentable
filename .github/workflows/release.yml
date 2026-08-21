@@ -103,6 +103,22 @@ jobs:
 
       # ---- the build ------------------------------------------------------
 
+      - name: put the API key on disk
+        # notarytool wants a file, and a secret is a string. Written to the
+        # runner's temp directory rather than the workspace so it cannot be
+        # picked up by a build step or an artefact upload, and the runner is
+        # destroyed afterwards regardless.
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$RUNNER_TEMP/asc-api-key.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc-api-key.p8"
+          # Prove it decoded to a key rather than to nothing. A malformed
+          # secret would otherwise surface much later as a notarization
+          # failure that reads like a credentials problem.
+          openssl pkey -in "$RUNNER_TEMP/asc-api-key.p8" -noout
+
       - name: build, sign and notarize
         env:
           # The Developer ID certificate, exported as .p12 and base64'd. The
@@ -113,13 +129,19 @@ jobs:
           # The full identity string, e.g.
           #   Developer ID Application: Some Name (ABCDE12345)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # Notarization, by the Apple ID route. The App Store Connect API key
-          # route (APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_PATH) is
-          # the alternative and is better for a team, because it is not tied
-          # to one person's account or their 2FA.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }} # an app-specific password
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Notarization by App Store Connect API key rather than by Apple ID
+          # and an app-specific password. Deliberately: an app-specific
+          # password belongs to one person, dies with their 2FA device or
+          # their leaving date, and cannot be rotated by anybody else. A team
+          # key belongs to the team.
+          #
+          # Neither the issuer nor the key id is secret - both appear in the
+          # App Store Connect UI to anyone with access. They live in secrets
+          # only so that rotating the key is one place rather than three.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
         run: |
           set -euo pipefail
           # Hardened runtime is on by default in tauri-bundler and must stay
