@@ -255,7 +255,9 @@ mod tests {
         std::fs::create_dir_all(&empty).expect("creates");
         assert_eq!(
             resolve_file(&f.root, "/empty/", "index.html"),
-            Err(ResolveError::NoEntry(empty.canonicalize().expect("canonical")))
+            Err(ResolveError::NoEntry(
+                empty.canonicalize().expect("canonical")
+            ))
         );
     }
 
