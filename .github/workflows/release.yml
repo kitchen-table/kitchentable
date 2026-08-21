@@ -333,6 +333,33 @@ jobs:
 
       # ---- publish --------------------------------------------------------
 
+      - name: name the download so a link to it can be permanent
+        # Tauri produces "Kitchen Table_0.1.0_aarch64.dmg" - a space, and the
+        # version baked into the filename. Both matter, because GitHub serves
+        #
+        #   /releases/latest/download/<asset-name>
+        #
+        # which always resolves to the newest published release. That is the
+        # URL the landing page wants: set once, correct forever, nothing to
+        # update at each release. It only works while the asset name stays
+        # identical between releases, so a versioned filename would silently
+        # break the download button every time we shipped.
+        #
+        # Both names are uploaded. The stable one is what the site links to;
+        # the versioned one is what somebody wants when they need to install
+        # exactly 0.3.1 again, and it keeps the space out of that URL too.
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/upload"
+          mkdir -p "$out"
+          cp "$DMG" "$out/KitchenTable.dmg"
+          cp "$DMG" "$out/KitchenTable-$VERSION-universal.dmg"
+          ls -la "$out"
+          echo "STABLE_DMG=$out/KitchenTable.dmg" >> "$GITHUB_ENV"
+          echo "VERSIONED_DMG=$out/KitchenTable-$VERSION-universal.dmg" >> "$GITHUB_ENV"
+
       - name: attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -347,7 +374,7 @@ jobs:
           # Draft on purpose. The last check on a Mac app is a human opening
           # it, and publishing is one click once somebody has. Until then the
           # landing page's download button must not find it.
-          gh release create "$TAG" "$DMG" \
+          gh release create "$TAG" "$STABLE_DMG" "$VERSIONED_DMG" \
             --draft \
             --target "$GITHUB_SHA" \
             --title "$TAG" \
@@ -365,4 +392,8 @@ jobs:
             echo "- signed, notarized and stapled; universal"
             echo "- created as a **draft**, so no tag exists yet"
             echo "- open the DMG on a clean Mac, then press Publish - that is what creates the tag"
+            echo
+            echo "Once published, the landing page's permanent link resolves:"
+            echo
+            echo "    https://github.com/$GITHUB_REPOSITORY/releases/latest/download/KitchenTable.dmg"
           } >> "$GITHUB_STEP_SUMMARY"
